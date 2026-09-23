@@ -1,0 +1,48 @@
+# Render Blueprint Specification for GymForge (Academia RPG)
+# https://render.com/docs/blueprint-spec
+
+services:
+  # ----------------------------------------------------
+  # 1. BACKEND REST API (FastAPI Python)
+  # ----------------------------------------------------
+  - type: web
+    name: gymforge-api
+    env: python
+    region: oregon
+    plan: free
+    buildCommand: pip install -r backend/requirements.txt
+    startCommand: cd backend && uvicorn app:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /
+    autoDeploy: true
+    envVars:
+      - key: ENVIRONMENT
+        value: production
+      - key: ALLOWED_ORIGINS
+        value: "*"
+      - key: GEMINI_API_KEY
+        sync: false # Set in Render Dashboard secrets
+      - key: FIREBASE_CREDENTIALS_PATH
+        value: ./firebase-credentials.json
+
+  # ----------------------------------------------------
+  # 2. FRONTEND PROGRESSIVE WEB APP (Vite / Static Site)
+  # ----------------------------------------------------
+  - type: web
+    name: gymforge-pwa
+    env: static
+    region: oregon
+    plan: free
+    buildCommand: cd frontend && npm install && npm run build
+    staticPublishPath: frontend/dist
+    autoDeploy: true
+    routes:
+      # SPA fallback routing: All requests rewrite to /index.html (200 OK)
+      - type: rewrite
+        source: /*
+        destination: /index.html
+    envVars:
+      - key: VITE_API_BASE_URL
+        fromService:
+          type: web
+          name: gymforge-api
+          property: host
