@@ -15,6 +15,9 @@ import { soundService } from './services/soundService.js';
 import { closeLevelUpModal } from './components/LevelUpModal.js';
 import { aiChatDrawer } from './components/AIChatDrawer.js';
 
+import { toast } from './components/Toast.js';
+import { apiClient } from './services/api.js';
+
 // Setup Global GymForge API on window
 window.gymforge = window.gymforge || {};
 
@@ -53,6 +56,30 @@ window.gymforge.closeLevelUpModal = function() {
 window.gymforge.refreshPage = function() {
   renderApp();
 };
+
+window.gymforge.acceptBattleChallenge = function(toastId) {
+  const toastEl = document.getElementById(toastId);
+  if (toastEl) toastEl.remove();
+  soundService.playClick();
+  window.location.hash = '#arena';
+  setTimeout(() => {
+    window.gymforge.startMatchmaking();
+  }, 300);
+};
+
+// Periodic Global Challenge Broadcast Listener
+let lastSeenChallengeId = null;
+setInterval(async () => {
+  try {
+    const res = await apiClient.request('/api/arena/active-challenge');
+    if (res && res.hasChallenge && res.challenge && res.challenge.id !== lastSeenChallengeId) {
+      lastSeenChallengeId = res.challenge.id;
+      toast.showBattleChallenge(res.challenge.challengerName, res.challenge.message);
+    }
+  } catch {
+    // offline silent
+  }
+}, 5000);
 
 // Router Mapping
 const ROUTES = {
