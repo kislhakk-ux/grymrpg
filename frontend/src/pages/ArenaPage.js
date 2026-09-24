@@ -1,9 +1,13 @@
-// GymForge — PVP Battle Arena with Real-Time Sync
+// GymForge — PVP Battle Arena with Firestore Real-Time Sync
 import { storageService } from '../services/storageService.js';
 import { renderCharacterAvatar } from '../components/CharacterAvatar.js';
 import { soundService } from '../services/soundService.js';
 import { toast } from '../components/Toast.js';
-import { apiClient, API_BASE_URL } from '../services/api.js';
+import { apiClient } from '../services/api.js';
+import {
+  enterQueue, leaveQueue, broadcastChallenge, clearChallengeBroadcast,
+  tryMatchFromQueue, createMatch, updateMatchState, listenMatchState
+} from '../services/arenaFirestore.js';
 
 // Arena State
 let arenaState = 'lobby'; // 'lobby', 'matchmaking', 'battle', 'result'
@@ -25,11 +29,11 @@ let activeTab = 'arena'; // 'arena', 'ranking'
 let matchmakingInterval = null;
 let matchmakingSecondsRemaining = 20;
 
-// Real PVP Sync
+// Real PVP Sync (Firestore-based)
 let isRealPlayerMatch = false;
 let myUserId = null;
-let matchSyncInterval = null;
-let lastSyncTs = 0;
+let isPlayer1 = false;
+let unsubMatchListener = null; // Firestore onSnapshot unsubscribe
 
 export function getOnlineWarriorsCount() {
   const now = Date.now();
@@ -595,14 +599,32 @@ window.gymforge.startMatchmaking = async function() {
 
   const user = storageService.getUserProfile();
   const character = storageService.getCharacter();
+  myUserId = user.userId || user.email || 'warrior_guest';
 
-  // Register in real queue & broadcast challenge
+  // 1. Enter Firestore queue for cross-device match
+  try {
+    await enterQueue(myUserId, {
+      userId: myUserId,
+      nome: user.nome || 'Guerreiro da Forja',
+      nomePersonagem: character.nomePersonagem || 'Herói do Aço',
+      nivel: user.nivel || 1,
+      classe: character.classe || 'guerreiro',
+      atributos: character.atributos || { FORCA: 10, RESISTENCIA: 8, AGILIDADE: 6, VITALIDADE: 10, DISCIPLINA: 8 },
+      rating: user.pvpRating || 1000,
+      foto: user.foto || null
+    });
+  } catch (e) {
+    console.warn('[Arena] Firestore enterQueue fallback:', e);
+  }
+
+  // 2. Also register in Backend REST queue
   try {
     const initRes = await apiClient.request('/api/arena/matchmake', {
       method: 'POST',
       body: JSON.stringify({ userProfile: user, character })
     });
     if (initRes.matched && initRes.opponent) {
+      isPlayer1 = initRes.isPlayer1 !== false;
       launchBattle(initRes.opponent, initRes.matchId, initRes.isRealPlayer);
       return;
     }
@@ -610,12 +632,53 @@ window.gymforge.startMatchmaking = async function() {
     console.warn('Matchmaking local fallback:', err);
   }
 
-  // Start 20-second active real player search interval
+  // 3. Start 20-second active real player search interval
   if (matchmakingInterval) clearInterval(matchmakingInterval);
 
   matchmakingInterval = setInterval(async () => {
     matchmakingSecondsRemaining--;
     window.gymforge.refreshPage();
+
+    // Check Firestore Queue for other real players
+    try {
+      const matchFound = await tryMatchFromQueue(myUserId, user);
+      if (matchFound && matchFound.matchedPlayer) {
+        clearInterval(matchmakingInterval);
+        matchmakingInterval = null;
+        const matchId = `match_${Date.now()}_${myUserId.slice(0, 5)}`;
+        isPlayer1 = true;
+        const opp = matchFound.matchedPlayer;
+        const oppMaxHp = 100 + ((opp.atributos?.VITALIDADE || 10) * 15) + ((opp.nivel || 1) * 10);
+        opp.maxHp = oppMaxHp;
+        opp.currentHp = oppMaxHp;
+
+        // Create match in Firestore
+        await createMatch(matchId, {
+          id: matchId,
+          player1Id: myUserId,
+          player2Id: opp.userId,
+          player1: { userId: myUserId, nome: user.nome, character },
+          player2: opp,
+          battleState: {
+            player1Hp: playerMaxHp,
+            player2Hp: oppMaxHp,
+            player1Fury: 0,
+            player2Fury: 0,
+            player1Blocking: false,
+            player2Blocking: false,
+            currentTurnUserId: myUserId,
+            status: 'active',
+            combatLog: ['O combate real começou! Que vença o mais forte!'],
+            lastUpdated: Date.now()
+          }
+        });
+
+        launchBattle(opp, matchId, true);
+        return;
+      }
+    } catch (e) {
+      console.warn('[Arena] tryMatchFromQueue check:', e);
+    }
 
     // Poll status from server
     try {
@@ -623,6 +686,7 @@ window.gymforge.startMatchmaking = async function() {
       if (statusRes.matched && statusRes.opponent) {
         clearInterval(matchmakingInterval);
         matchmakingInterval = null;
+        isPlayer1 = statusRes.isPlayer1 !== false;
         launchBattle(statusRes.opponent, statusRes.matchId, statusRes.isRealPlayer);
         return;
       }
@@ -633,6 +697,7 @@ window.gymforge.startMatchmaking = async function() {
     if (matchmakingSecondsRemaining <= 0) {
       clearInterval(matchmakingInterval);
       matchmakingInterval = null;
+      try { await leaveQueue(myUserId); } catch {}
 
       // 20s completed -> connect seamlessly with authentic colosseum warrior
       const warriorsPool = [
@@ -665,49 +730,46 @@ window.gymforge.startMatchmaking = async function() {
   }, 1000);
 };
 
+// ---- Firestore real-time match sync ----
+
 function startMatchSync(matchId) {
   stopMatchSync();
-  matchSyncInterval = setInterval(async () => {
-    try {
-      const res = await apiClient.request(`/api/arena/match/${matchId}/state`);
-      if (res && res.state) applyServerMatchState(res);
-    } catch { /* silent */ }
-  }, 1500);
+  unsubMatchListener = listenMatchState(matchId, (matchData) => {
+    const state = matchData.battleState;
+    if (!state) return;
+    applyServerMatchState({ state, isPlayer1, isMyTurn: state.currentTurnUserId === myUserId, status: state.status, winner: state.winner });
+  });
 }
 
 function stopMatchSync() {
-  if (matchSyncInterval) {
-    clearInterval(matchSyncInterval);
-    matchSyncInterval = null;
+  if (unsubMatchListener) {
+    try { unsubMatchListener(); } catch {}
+    unsubMatchListener = null;
   }
 }
 
 function applyServerMatchState(serverData) {
-  const { state, isMyTurn, isPlayer1, status, winner } = serverData;
+  const { state, isMyTurn, status, winner } = serverData;
   if (!state) return;
 
-  const ts = state.lastUpdated || 0;
-  if (ts <= lastSyncTs) return; // no new update
-  lastSyncTs = ts;
-
-  // Map server state to local player/opponent perspective
+  // Map server state to local player/opponent perspective using module-level isPlayer1
   if (isPlayer1) {
-    playerHp = state.player1Hp;
-    opponentHp = state.player2Hp;
-    playerFury = state.player1Fury;
-    opponentFury = state.player2Fury;
-    isPlayerBlocking = state.player1Blocking;
-    isOpponentBlocking = state.player2Blocking;
+    playerHp = state.player1Hp ?? playerHp;
+    opponentHp = state.player2Hp ?? opponentHp;
+    playerFury = state.player1Fury ?? playerFury;
+    opponentFury = state.player2Fury ?? opponentFury;
+    isPlayerBlocking = state.player1Blocking || false;
+    isOpponentBlocking = state.player2Blocking || false;
   } else {
-    playerHp = state.player2Hp;
-    opponentHp = state.player1Hp;
-    playerFury = state.player2Fury;
-    opponentFury = state.player1Fury;
-    isPlayerBlocking = state.player2Blocking;
-    isOpponentBlocking = state.player1Blocking;
+    playerHp = state.player2Hp ?? playerHp;
+    opponentHp = state.player1Hp ?? opponentHp;
+    playerFury = state.player2Fury ?? playerFury;
+    opponentFury = state.player1Fury ?? opponentFury;
+    isPlayerBlocking = state.player2Blocking || false;
+    isOpponentBlocking = state.player1Blocking || false;
   }
 
-  combatLogs = state.combatLog || [];
+  combatLogs = state.combatLog || combatLogs;
   isPlayerTurn = isMyTurn;
 
   // Show damage floater if opponent just attacked us
@@ -772,10 +834,13 @@ function launchBattle(opponent, matchId, realPlayer = false) {
   }
 }
 
-window.gymforge.cancelMatchmaking = function() {
+window.gymforge.cancelMatchmaking = async function() {
   if (matchmakingInterval) {
     clearInterval(matchmakingInterval);
     matchmakingInterval = null;
+  }
+  if (myUserId) {
+    try { await leaveQueue(myUserId); } catch {}
   }
   stopMatchSync();
   soundService.playClick();

@@ -67,23 +67,24 @@ service cloud.firestore {
       allow write: if isOwner(userId);
     }
 
-    // Arena PVP Collections (written exclusively by backend Admin SDK)
-    // arena_queue: matchmaking queue entries
+    // Arena PVP Collections (written by frontend Firebase Client SDK for cross-device sync)
+    // arena_queue: each user manages their own queue entry
     match /arena_queue/{userId} {
       allow read: if isAuthenticated();
-      allow write: if false; // backend-only via Admin SDK
+      allow create, update: if isOwner(userId);
+      allow delete: if isAuthenticated(); // any player can remove matched opponent
     }
 
-    // arena_global: active challenge broadcast (single doc)
+    // arena_global: active challenge broadcast (any authenticated user can set)
     match /arena_global/{docId} {
       allow read: if isAuthenticated();
-      allow write: if false; // backend-only via Admin SDK
+      allow write: if isAuthenticated();
     }
 
-    // arena_matches: matched game sessions
+    // arena_matches: match sessions (any authenticated player in match can update)
     match /arena_matches/{matchId} {
       allow read: if isAuthenticated();
-      allow write: if false; // backend-only via Admin SDK
+      allow write: if isAuthenticated();
     }
   }
 }
