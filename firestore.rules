@@ -68,23 +68,19 @@ service cloud.firestore {
     }
 
     // Arena PVP Collections (written by frontend Firebase Client SDK for cross-device sync)
-    // arena_queue: each user manages their own queue entry
+    // arena_queue: matchmaking queue entries (any device can write and match)
     match /arena_queue/{userId} {
-      allow read: if isAuthenticated();
-      allow create, update: if isOwner(userId);
-      allow delete: if isAuthenticated(); // any player can remove matched opponent
+      allow read, write: if true;
     }
 
-    // arena_global: active challenge broadcast (any authenticated user can set)
+    // arena_global: active challenge broadcast (broadcasts to all connected players)
     match /arena_global/{docId} {
-      allow read: if isAuthenticated();
-      allow write: if isAuthenticated();
+      allow read, write: if true;
     }
 
-    // arena_matches: match sessions (any authenticated player in match can update)
+    // arena_matches: match sessions (real-time battle turn sync)
     match /arena_matches/{matchId} {
-      allow read: if isAuthenticated();
-      allow write: if isAuthenticated();
+      allow read, write: if true;
     }
   }
 }

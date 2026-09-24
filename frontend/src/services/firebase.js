@@ -1,7 +1,7 @@
 // GymForge — Firebase Client Service (Modular v10)
 import { initializeApp, getApps } from 'firebase/app';
-import { getAuth, GoogleAuthProvider, signInWithPopup, signOut as fbSignOut, onAuthStateChanged } from 'firebase/auth';
-import { getFirestore, doc, setDoc, getDoc, updateDoc } from 'firebase/firestore';
+import { getAuth, GoogleAuthProvider, signInWithPopup, signOut as fbSignOut, onAuthStateChanged, signInAnonymously } from 'firebase/auth';
+import { getFirestore, doc, setDoc, getDoc, updateDoc, deleteDoc, onSnapshot, collection, getDocs, query, where, serverTimestamp } from 'firebase/firestore';
 
 const firebaseConfig = {
   apiKey: import.meta.env.VITE_FIREBASE_API_KEY || "",
@@ -37,4 +37,7 @@ if (isFirebaseConfigured) {
   console.log('⚡ GymForge operando em Modo Local / Demonstração (Configure .env com credenciais do Firebase para sincronização online).');
 }
 
-export { auth, db, googleProvider, signInWithPopup, fbSignOut, onAuthStateChanged, doc, setDoc, getDoc, updateDoc };
+export {
+  auth, db, googleProvider, signInWithPopup, fbSignOut, onAuthStateChanged, signInAnonymously,
+  doc, setDoc, getDoc, updateDoc, deleteDoc, onSnapshot, collection, getDocs, query, where, serverTimestamp
+};

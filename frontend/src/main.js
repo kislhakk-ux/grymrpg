@@ -19,6 +19,7 @@ import { aiChatDrawer } from './components/AIChatDrawer.js';
 
 import { toast } from './components/Toast.js';
 import { apiClient, API_BASE_URL } from './services/api.js';
+import { listenForChallenges } from './services/arenaFirestore.js';
 
 // Setup Global GymForge API on window
 window.gymforge = window.gymforge || {};
@@ -134,30 +135,59 @@ window.gymforge.submitCustomGoogleLogin = function(e) {
   window.gymforge.connectGoogle(email || null, name || null);
 };
 
-// Periodic Global Challenge Broadcast Listener — notifies ALL connected users
-let lastSeenChallengeId = null;
-setInterval(async () => {
-  const user = storageService.getUserProfile();
-  if (!user) return;
-
-  // Only skip if we are ourselves in matchmaking state
-  // (we'll hear our own broadcast but challengerId filter on backend blocks it)
-  try {
-    const headers = { 'Content-Type': 'application/json' };
-    const userId = user.userId || user.email || 'warrior_guest';
-    headers['X-User-Id'] = userId;
-
-    const response = await fetch(`${API_BASE_URL}/api/arena/active-challenge`, { headers });
-    if (!response.ok) return;
-    const res = await response.json();
-    if (res && res.hasChallenge && res.challenge && res.challenge.id !== lastSeenChallengeId) {
-      lastSeenChallengeId = res.challenge.id;
-      toast.showBattleChallenge(res.challenge.challengerName, res.challenge.message);
-    }
-  } catch {
-    // offline or backend down — silent
+window.gymforge.acceptBattleChallenge = function(toastId) {
+  if (toastId) {
+    try { document.getElementById(toastId)?.remove(); } catch {}
   }
-}, 2000);
+  window.location.hash = '#arena';
+  setTimeout(() => {
+    if (typeof window.gymforge.startMatchmaking === 'function') {
+      window.gymforge.startMatchmaking();
+    }
+  }, 250);
+};
+
+// Real-Time Global Challenge Broadcast Listener (Firestore + REST Polling Fallback)
+let lastSeenChallengeId = null;
+
+function initGlobalChallengeListeners() {
+  const user = storageService.getUserProfile();
+  const myUserId = user?.userId || 'warrior_guest';
+
+  // 1. Real-Time Firestore onSnapshot
+  try {
+    listenForChallenges(myUserId, (chal) => {
+      if (chal && chal.id !== lastSeenChallengeId) {
+        lastSeenChallengeId = chal.id;
+        toast.showBattleChallenge(chal.challengerName || chal.characterName || 'Um Guerreiro', chal.message);
+      }
+    });
+  } catch (e) {
+    console.warn('[Main] Firestore challenge listener:', e);
+  }
+
+  // 2. Periodic REST Fallback
+  setInterval(async () => {
+    const currentProfile = storageService.getUserProfile();
+    if (!currentProfile) return;
+
+    try {
+      const headers = { 'Content-Type': 'application/json', 'X-User-Id': currentProfile.userId || 'warrior_guest' };
+      const response = await fetch(`${API_BASE_URL}/api/arena/active-challenge`, { headers });
+      if (!response.ok) return;
+      const res = await response.json();
+      if (res && res.hasChallenge && res.challenge && res.challenge.id !== lastSeenChallengeId) {
+        lastSeenChallengeId = res.challenge.id;
+        toast.showBattleChallenge(res.challenge.challengerName, res.challenge.message);
+      }
+    } catch {
+      // silent
+    }
+  }, 3000);
+}
+
+// Start listener after load
+setTimeout(initGlobalChallengeListeners, 500);
 
 // Router Mapping
 const ROUTES = {

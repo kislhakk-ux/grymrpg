@@ -6,7 +6,7 @@ import { toast } from '../components/Toast.js';
 import { apiClient } from '../services/api.js';
 import {
   enterQueue, leaveQueue, broadcastChallenge, clearChallengeBroadcast,
-  tryMatchFromQueue, createMatch, updateMatchState, listenMatchState
+  tryMatchFromQueue, createMatch, updateMatchState, listenMatchState, listenMyQueueEntry
 } from '../services/arenaFirestore.js';
 
 // Arena State
@@ -33,7 +33,8 @@ let matchmakingSecondsRemaining = 20;
 let isRealPlayerMatch = false;
 let myUserId = null;
 let isPlayer1 = false;
-let unsubMatchListener = null; // Firestore onSnapshot unsubscribe
+let unsubMatchListener = null; // Firestore match onSnapshot unsubscribe
+let unsubQueueListener = null; // Firestore queue onSnapshot unsubscribe
 
 export function getOnlineWarriorsCount() {
   const now = Date.now();
@@ -601,23 +602,55 @@ window.gymforge.startMatchmaking = async function() {
   const character = storageService.getCharacter();
   myUserId = user.userId || user.email || 'warrior_guest';
 
+  const myProfile = {
+    userId: myUserId,
+    nome: user.nome || 'Guerreiro da Forja',
+    nomePersonagem: character.nomePersonagem || 'Herói do Aço',
+    nivel: user.nivel || 1,
+    classe: character.classe || 'guerreiro',
+    atributos: character.atributos || { FORCA: 10, RESISTENCIA: 8, AGILIDADE: 6, VITALIDADE: 10, DISCIPLINA: 8 },
+    rating: user.pvpRating || 1000,
+    foto: user.foto || null
+  };
+
   // 1. Enter Firestore queue for cross-device match
   try {
-    await enterQueue(myUserId, {
-      userId: myUserId,
-      nome: user.nome || 'Guerreiro da Forja',
-      nomePersonagem: character.nomePersonagem || 'Herói do Aço',
-      nivel: user.nivel || 1,
-      classe: character.classe || 'guerreiro',
-      atributos: character.atributos || { FORCA: 10, RESISTENCIA: 8, AGILIDADE: 6, VITALIDADE: 10, DISCIPLINA: 8 },
-      rating: user.pvpRating || 1000,
-      foto: user.foto || null
-    });
+    await enterQueue(myUserId, myProfile);
   } catch (e) {
     console.warn('[Arena] Firestore enterQueue fallback:', e);
   }
 
-  // 2. Also register in Backend REST queue
+  // 2. Broadcast Global Challenge so other connected devices see the Toast
+  try {
+    await broadcastChallenge({
+      id: `chal_${Date.now()}_${Math.floor(Math.random() * 900 + 100)}`,
+      challengerId: myUserId,
+      challengerName: user.nome || 'Guerreiro da Forja',
+      characterName: character.nomePersonagem || 'Herói do Aço',
+      level: user.nivel || 1,
+      message: '⚔️ Um guerreiro quer testar suas habilidades na arena!',
+      timestamp: Date.now()
+    });
+  } catch (e) {
+    console.warn('[Arena] broadcastChallenge fallback:', e);
+  }
+
+  // 3. Real-Time Listener on our own queue doc (notified the instant someone matches us)
+  if (unsubQueueListener) {
+    try { unsubQueueListener(); } catch {}
+    unsubQueueListener = null;
+  }
+  unsubQueueListener = listenMyQueueEntry(myUserId, (matchData) => {
+    if (arenaState !== 'matchmaking') return;
+    if (matchmakingInterval) {
+      clearInterval(matchmakingInterval);
+      matchmakingInterval = null;
+    }
+    isPlayer1 = true; // The waiting player is Player 1
+    launchBattle(matchData.opponent, matchData.matchId, true);
+  });
+
+  // 4. Also register in Backend REST queue
   try {
     const initRes = await apiClient.request('/api/arena/matchmake', {
       method: 'POST',
@@ -632,48 +665,21 @@ window.gymforge.startMatchmaking = async function() {
     console.warn('Matchmaking local fallback:', err);
   }
 
-  // 3. Start 20-second active real player search interval
+  // 5. Start 20-second active real player search interval
   if (matchmakingInterval) clearInterval(matchmakingInterval);
 
   matchmakingInterval = setInterval(async () => {
     matchmakingSecondsRemaining--;
     window.gymforge.refreshPage();
 
-    // Check Firestore Queue for other real players
+    // Check Firestore Queue for other waiting warriors
     try {
-      const matchFound = await tryMatchFromQueue(myUserId, user);
+      const matchFound = await tryMatchFromQueue(myUserId, myProfile);
       if (matchFound && matchFound.matchedPlayer) {
         clearInterval(matchmakingInterval);
         matchmakingInterval = null;
-        const matchId = `match_${Date.now()}_${myUserId.slice(0, 5)}`;
-        isPlayer1 = true;
-        const opp = matchFound.matchedPlayer;
-        const oppMaxHp = 100 + ((opp.atributos?.VITALIDADE || 10) * 15) + ((opp.nivel || 1) * 10);
-        opp.maxHp = oppMaxHp;
-        opp.currentHp = oppMaxHp;
-
-        // Create match in Firestore
-        await createMatch(matchId, {
-          id: matchId,
-          player1Id: myUserId,
-          player2Id: opp.userId,
-          player1: { userId: myUserId, nome: user.nome, character },
-          player2: opp,
-          battleState: {
-            player1Hp: playerMaxHp,
-            player2Hp: oppMaxHp,
-            player1Fury: 0,
-            player2Fury: 0,
-            player1Blocking: false,
-            player2Blocking: false,
-            currentTurnUserId: myUserId,
-            status: 'active',
-            combatLog: ['O combate real começou! Que vença o mais forte!'],
-            lastUpdated: Date.now()
-          }
-        });
-
-        launchBattle(opp, matchId, true);
+        isPlayer1 = false; // The matching joiner is Player 2
+        launchBattle(matchFound.matchedPlayer, matchFound.matchId, true);
         return;
       }
     } catch (e) {
@@ -697,7 +703,12 @@ window.gymforge.startMatchmaking = async function() {
     if (matchmakingSecondsRemaining <= 0) {
       clearInterval(matchmakingInterval);
       matchmakingInterval = null;
+      if (unsubQueueListener) {
+        try { unsubQueueListener(); } catch {}
+        unsubQueueListener = null;
+      }
       try { await leaveQueue(myUserId); } catch {}
+      try { await clearChallengeBroadcast(); } catch {}
 
       // 20s completed -> connect seamlessly with authentic colosseum warrior
       const warriorsPool = [
@@ -796,10 +807,16 @@ function launchBattle(opponent, matchId, realPlayer = false) {
   const character = storageService.getCharacter() || {};
   const attrs = character.atributos || { VITALIDADE: 10 };
 
+  // Stop queue listener & clean broadcast
+  if (unsubQueueListener) {
+    try { unsubQueueListener(); } catch {}
+    unsubQueueListener = null;
+  }
+  try { clearChallengeBroadcast(); } catch {}
+
   // Set real match sync flags
   isRealPlayerMatch = realPlayer === true;
   myUserId = user.userId || user.email || 'warrior_guest';
-  lastSyncTs = 0;
 
   currentOpponent = opponent || {
     nome: "Leonidas do Aço",
@@ -818,8 +835,8 @@ function launchBattle(opponent, matchId, realPlayer = false) {
   opponentMaxHp = currentOpponent.maxHp || (100 + ((currentOpponent.atributos?.VITALIDADE || 10) * 15) + ((currentOpponent.nivel || 1) * 10));
   opponentHp = opponentMaxHp;
   opponentFury = 0;
-  combatLogs = ['O arbitro da arena sinaliza o inicio do combate! FIGHT!'];
-  isPlayerTurn = true; // for bot; for real match, server will correct via sync
+  combatLogs = ['⚔️ O árbitro da arena sinaliza o início do combate! FIGHT!'];
+  isPlayerTurn = isRealPlayerMatch ? isPlayer1 : true; // Player 1 goes first in real PVP
   isPlayerBlocking = false;
   isOpponentBlocking = false;
 
@@ -829,8 +846,7 @@ function launchBattle(opponent, matchId, realPlayer = false) {
 
   // Start real-time sync for real player matches
   if (isRealPlayerMatch && currentMatch) {
-    // Small delay to let server initialize battle state
-    setTimeout(() => startMatchSync(currentMatch), 800);
+    setTimeout(() => startMatchSync(currentMatch), 400);
   }
 }
 
@@ -839,9 +855,14 @@ window.gymforge.cancelMatchmaking = async function() {
     clearInterval(matchmakingInterval);
     matchmakingInterval = null;
   }
+  if (unsubQueueListener) {
+    try { unsubQueueListener(); } catch {}
+    unsubQueueListener = null;
+  }
   if (myUserId) {
     try { await leaveQueue(myUserId); } catch {}
   }
+  try { await clearChallengeBroadcast(); } catch {}
   stopMatchSync();
   soundService.playClick();
   arenaState = 'lobby';
@@ -852,45 +873,104 @@ window.gymforge.cancelMatchmaking = async function() {
 window.gymforge.executeBattleAction = async function(actionType) {
   if (!isPlayerTurn) return;
 
-  // --- REAL PVP MATCH: submit action to server ---
+  const user = storageService.getUserProfile() || {};
+  const character = storageService.getCharacter() || {};
+  const attrs = character.atributos || { FORCA: 10, RESISTENCIA: 8, AGILIDADE: 6, VITALIDADE: 10, DISCIPLINA: 8 };
+
+  // --- REAL PVP MATCH: immediate local feedback + Firestore sync + backend REST ---
   if (isRealPlayerMatch && currentMatch) {
     isPlayerTurn = false;
-    window.gymforge.refreshPage();
-    try {
-      const res = await apiClient.request(`/api/arena/match/${currentMatch}/action`, {
-        method: 'POST',
-        body: JSON.stringify({ actionType, userId: myUserId })
-      });
-      if (res.success && res.newState) {
-        // Immediately apply the result (our own action feedback)
-        const s = res.newState;
-        const isP1 = res.newState.currentTurnUserId !== myUserId ||
-                      (s.player1Hp !== undefined && s.player2Hp !== undefined);
-        // Re-derive perspective from server state via next sync
-        lastSyncTs = 0; // force apply on next poll
-        const ar = res.actionResult;
-        if (ar && ar.damage > 0) showDamageFloater(ar.damage, ar.isCrit);
-        if (ar?.isCrit) soundService.playHeavyHit();
-        else if (actionType === 'forge_ultimate') soundService.playSpecial();
-        else if (actionType === 'iron_block') soundService.playBlock();
-        else soundService.playHit();
-      } else if (res.error === 'Not your turn') {
-        isPlayerTurn = false;
-      }
-    } catch (err) {
-      console.warn('[Arena] action submit failed:', err);
-      isPlayerTurn = true;
+
+    let damage = 0;
+    let isCrit = false;
+    let logText = "";
+    let furyGain = 0;
+
+    if (actionType === 'iron_block') {
+      soundService.playBlock();
+      isPlayerBlocking = true;
+      furyGain = 20;
+      logText = `🛡️ ${character.nomePersonagem || 'Seu Herói'} assumiu Postura Defensiva (+20% Fúria)!`;
+    } else if (actionType === 'quick_strike') {
+      soundService.playHit();
+      damage = (attrs.FORCA * 1.4) + (attrs.AGILIDADE * 1.6) + Math.floor(Math.random() * 8);
+      furyGain = 15;
+      logText = `⚔️ ${character.nomePersonagem || 'Seu Herói'} desferiu um Golpe Rápido veloz causando ${Math.round(damage)} de dano!`;
+    } else if (actionType === 'heavy_strike') {
+      isCrit = Math.random() < 0.3;
+      damage = ((attrs.FORCA * 2.8) + ((user.nivel || 1) * 3)) * (isCrit ? 1.8 : 1.0);
+      furyGain = 25;
+      if (isCrit) soundService.playHeavyHit();
+      else soundService.playHit();
+      logText = isCrit 
+        ? `🔥 GOLPE CRÍTICO! ${character.nomePersonagem || 'Seu Herói'} acertou uma Pancada Pesada devastadora causando ${Math.round(damage)} de dano!`
+        : `🔨 ${character.nomePersonagem || 'Seu Herói'} acertou uma Pancada Pesada causando ${Math.round(damage)} de dano!`;
+    } else if (actionType === 'forge_ultimate') {
+      soundService.playSpecial();
+      damage = (attrs.FORCA * 4.0) + (attrs.DISCIPLINA * 2.5) + 30;
+      furyGain = -100;
+      logText = `⚡ FÚRIA SUPREMA DA FORJA! ${character.nomePersonagem || 'Seu Herói'} liberou todo o seu poder causando ${Math.round(damage)} de dano explosivo!`;
     }
+
+    if (isOpponentBlocking && damage > 0) {
+      damage = Math.round(damage * 0.35);
+      logText += " (Oponente bloqueou 65% do dano!)";
+      isOpponentBlocking = false;
+    }
+
+    damage = Math.max(0, Math.round(damage));
+    if (damage > 0) {
+      opponentHp = Math.max(0, opponentHp - damage);
+      showDamageFloater(damage, isCrit);
+    }
+    if (actionType === 'forge_ultimate') {
+      playerFury = 0;
+    } else {
+      playerFury = Math.min(100, Math.max(0, playerFury + furyGain));
+    }
+
+    combatLogs.unshift(logText);
+
+    // Build new state and sync to Firestore
+    const nextTurnUserId = (opponentHp <= 0) ? null : currentOpponent?.userId;
+    const matchStatus = (opponentHp <= 0) ? 'finished' : 'active';
+    const winner = (opponentHp <= 0) ? myUserId : null;
+
+    const newState = {
+      player1Hp: isPlayer1 ? playerHp : opponentHp,
+      player2Hp: isPlayer1 ? opponentHp : playerHp,
+      player1Fury: isPlayer1 ? playerFury : opponentFury,
+      player2Fury: isPlayer1 ? opponentFury : playerFury,
+      player1Blocking: isPlayer1 ? isPlayerBlocking : isOpponentBlocking,
+      player2Blocking: isPlayer1 ? isOpponentBlocking : isPlayerBlocking,
+      currentTurnUserId: nextTurnUserId,
+      lastActionResult: { damage, isCrit, actorUserId: myUserId, actionType, ts: Date.now() },
+      combatLog: combatLogs.slice(0, 20),
+      status: matchStatus,
+      winner,
+      lastUpdated: Date.now()
+    };
+
+    // Update in Firestore in real time
+    updateMatchState(currentMatch, newState);
+
+    // Also notify backend in background
+    apiClient.request(`/api/arena/match/${currentMatch}/action`, {
+      method: 'POST',
+      body: JSON.stringify({ actionType, userId: myUserId })
+    }).catch(() => {});
+
     window.gymforge.refreshPage();
+
+    if (opponentHp <= 0) {
+      soundService.playKO();
+      setTimeout(() => endBattle('player'), 800);
+    }
     return;
   }
 
   // --- LOCAL BOT MATCH ---
   isPlayerTurn = false;
-  const user = storageService.getUserProfile() || {};
-  const character = storageService.getCharacter() || {};
-  const attrs = character.atributos || { FORCA: 10, RESISTENCIA: 8, AGILIDADE: 6, VITALIDADE: 10, DISCIPLINA: 8 };
-
   let damage = 0;
   let isCrit = false;
   let logText = "";
