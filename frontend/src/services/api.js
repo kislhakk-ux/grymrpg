@@ -129,3 +129,4 @@ class ApiClient {
 }
 
 export const apiClient = new ApiClient();
+export const API_BASE_URL = apiClient.baseUrl;

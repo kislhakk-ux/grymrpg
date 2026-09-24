@@ -1,13 +1,19 @@
-# GymForge — Arena & PVP Combat Service with Real Matchmaking & Global Challenges
+# GymForge - Arena & PVP Combat Service with Real Matchmaking & Global Challenges
+# Uses Firestore as shared state for multi-worker/multi-instance environments.
 import time
 import random
-from database.firestore_db import get_db
+from database.firestore_db import get_db, is_firestore_connected
 from services.xp_service import calculate_level_from_xp
 
-# In-Memory Real Matchmaking Queue and Active Global Challenges
-active_match_queue = {}  # user_id -> { user_id, name, char_name, level, rating, attrs, hp, foto, timestamp }
-active_challenge_broadcast = None  # { id, challenger_name, char_name, message, timestamp }
-matched_games = {}  # match_id -> { player1, player2, status, turn, created_at }
+# --- In-Process Fallback (used only when Firestore is unavailable) ---
+_mem_queue = {}
+_mem_broadcast = None
+_mem_games = {}
+
+FS_QUEUE_COL = 'arena_queue'
+FS_BROADCAST_DOC = 'arena_broadcast'
+FS_BROADCAST_COL = 'arena_global'
+FS_MATCHES_COL = 'arena_matches'
 
 CHALLENGE_MESSAGES = [
     "⚔️ Um guerreiro quer testar suas habilidades na arena!",
@@ -75,147 +81,215 @@ DEFAULT_LEADERBOARD = [
     }
 ]
 
-def get_online_warriors_count() -> int:
-    """Returns a realistic online warriors count smoothly fluctuating between 50 and 100."""
+def get_online_warriors_count():
     now_sec = int(time.time())
     now_min = now_sec // 60
-    # Base online count around 75, varying smoothly between 54 and 96
-    cycle_1 = ((now_min % 20) - 10) / 10.0  # -1.0 to 1.0
-    cycle_2 = ((now_sec % 37) - 18) / 18.0  # -1.0 to 1.0
+    cycle_1 = ((now_min % 20) - 10) / 10.0
+    cycle_2 = ((now_sec % 37) - 18) / 18.0
     val = 74 + int(cycle_1 * 16) + int(cycle_2 * 6)
     return max(50, min(100, val))
 
-def calculate_max_hp(vitality: int = 10, level: int = 1) -> int:
+
+def calculate_max_hp(vitality=10, level=1):
     return 100 + (vitality * 15) + (level * 10)
 
-def register_matchmaking_request(user_id: str, user_profile: dict, character: dict):
-    """Registers user in the real queue and broadcasts short creative challenge to other users."""
-    global active_challenge_broadcast
+
+# ---- Firestore-aware shared state helpers ----
+
+def _queue_add(user_id, entry):
+    global _mem_queue
+    if is_firestore_connected:
+        try:
+            get_db().collection(FS_QUEUE_COL).document(user_id).set(entry)
+            return
+        except Exception as e:
+            print(f'[Arena] queue_add Firestore failed: {e}')
+    _mem_queue[user_id] = entry
+
+
+def _queue_get_all():
+    global _mem_queue
+    if is_firestore_connected:
+        try:
+            docs = get_db().collection(FS_QUEUE_COL).stream()
+            return {doc.id: doc.to_dict() for doc in docs}
+        except Exception as e:
+            print(f'[Arena] queue_get_all Firestore failed: {e}')
+    return dict(_mem_queue)
+
+
+def _queue_remove(user_id):
+    global _mem_queue
+    if is_firestore_connected:
+        try:
+            get_db().collection(FS_QUEUE_COL).document(user_id).delete()
+            return
+        except Exception as e:
+            print(f'[Arena] queue_remove Firestore failed: {e}')
+    _mem_queue.pop(user_id, None)
+
+
+def _queue_get(user_id):
+    global _mem_queue
+    if is_firestore_connected:
+        try:
+            doc = get_db().collection(FS_QUEUE_COL).document(user_id).get()
+            return doc.to_dict() if doc.exists else None
+        except Exception as e:
+            print(f'[Arena] queue_get Firestore failed: {e}')
+    return _mem_queue.get(user_id)
+
+
+def _broadcast_set(challenge):
+    global _mem_broadcast
+    if is_firestore_connected:
+        try:
+            db = get_db()
+            if challenge is None:
+                db.collection(FS_BROADCAST_COL).document(FS_BROADCAST_DOC).delete()
+            else:
+                db.collection(FS_BROADCAST_COL).document(FS_BROADCAST_DOC).set(challenge)
+            return
+        except Exception as e:
+            print(f'[Arena] broadcast_set Firestore failed: {e}')
+    _mem_broadcast = challenge
+
+
+def _broadcast_get():
+    global _mem_broadcast
+    if is_firestore_connected:
+        try:
+            doc = get_db().collection(FS_BROADCAST_COL).document(FS_BROADCAST_DOC).get()
+            return doc.to_dict() if doc.exists else None
+        except Exception as e:
+            print(f'[Arena] broadcast_get Firestore failed: {e}')
+    return _mem_broadcast
+
+
+def _match_add(match_id, game):
+    global _mem_games
+    if is_firestore_connected:
+        try:
+            get_db().collection(FS_MATCHES_COL).document(match_id).set(game)
+            return
+        except Exception as e:
+            print(f'[Arena] match_add Firestore failed: {e}')
+    _mem_games[match_id] = game
+
+
+def _match_get_for_user(user_id):
+    global _mem_games
+    if is_firestore_connected:
+        try:
+            db = get_db()
+            for field in ['player1.userId', 'player2.userId']:
+                results = db.collection(FS_MATCHES_COL).where(field, '==', user_id).limit(1).stream()
+                for doc in results:
+                    return doc.id, doc.to_dict()
+            return None, None
+        except Exception as e:
+            print(f'[Arena] match_get_for_user Firestore failed: {e}')
+    for m_id, game in _mem_games.items():
+        if game.get('player1', {}).get('userId') == user_id or game.get('player2', {}).get('userId') == user_id:
+            return m_id, game
+    return None, None
+
+
+def _match_remove(match_id):
+    global _mem_games
+    if is_firestore_connected:
+        try:
+            get_db().collection(FS_MATCHES_COL).document(match_id).delete()
+            return
+        except Exception as e:
+            print(f'[Arena] match_remove Firestore failed: {e}')
+    _mem_games.pop(match_id, None)
+
+
+# ---- Main Service Functions ----
+
+def register_matchmaking_request(user_id, user_profile, character):
     now = time.time()
-    
-    attrs = character.get("atributos", {"FORCA": 10, "RESISTENCIA": 8, "AGILIDADE": 6, "VITALIDADE": 10, "DISCIPLINA": 8})
-    max_hp = calculate_max_hp(attrs.get("VITALIDADE", 10), user_profile.get("nivel", 1))
+    attrs = character.get('atributos', {'FORCA': 10, 'RESISTENCIA': 8, 'AGILIDADE': 6, 'VITALIDADE': 10, 'DISCIPLINA': 8})
+    max_hp = calculate_max_hp(attrs.get('VITALIDADE', 10), user_profile.get('nivel', 1))
 
-    # Clean old queue items (> 30s)
-    for uid in list(active_match_queue.keys()):
-        if now - active_match_queue[uid]["timestamp"] > 30:
-            del active_match_queue[uid]
+    # Clean stale entries (>30s)
+    all_queue = _queue_get_all()
+    for uid, entry in list(all_queue.items()):
+        if now - entry.get('timestamp', now) > 30:
+            _queue_remove(uid)
+            del all_queue[uid]
 
-    # Check if another REAL user is already in the queue waiting
-    for uid, candidate in list(active_match_queue.items()):
-        if uid != user_id:
-            # Match found with REAL player!
-            del active_match_queue[uid]
-            match_id = f"match_real_{int(now)}_{random.randint(100, 999)}"
-            
-            p1_obj = {
-                "userId": candidate["userId"],
-                "nome": candidate["nome"],
-                "nomePersonagem": candidate["nomePersonagem"],
-                "nivel": candidate["nivel"],
-                "classe": candidate["classe"],
-                "atributos": candidate["atributos"],
-                "maxHp": candidate["maxHp"],
-                "currentHp": candidate["maxHp"],
-                "fury": 0,
-                "rating": candidate["rating"],
-                "foto": candidate.get("foto")
-            }
-            p2_obj = {
-                "userId": user_id,
-                "nome": user_profile.get("nome", "Guerreiro da Forja"),
-                "nomePersonagem": character.get("nomePersonagem", "Ares"),
-                "nivel": user_profile.get("nivel", 1),
-                "classe": character.get("classe", "guerreiro"),
-                "atributos": attrs,
-                "maxHp": max_hp,
-                "currentHp": max_hp,
-                "fury": 0,
-                "rating": user_profile.get("pvpRating", 1000),
-                "foto": user_profile.get("foto")
-            }
+    # Match with another real user already waiting
+    for uid, candidate in all_queue.items():
+        if uid == user_id:
+            continue
+        _queue_remove(uid)
+        match_id = f'match_real_{int(now)}_{random.randint(100, 999)}'
+        p1_obj = {
+            'userId': candidate['userId'], 'nome': candidate['nome'],
+            'nomePersonagem': candidate['nomePersonagem'], 'nivel': candidate['nivel'],
+            'classe': candidate['classe'], 'atributos': candidate['atributos'],
+            'maxHp': candidate['maxHp'], 'currentHp': candidate['maxHp'],
+            'fury': 0, 'rating': candidate['rating'], 'foto': candidate.get('foto')
+        }
+        p2_obj = {
+            'userId': user_id, 'nome': user_profile.get('nome', 'Guerreiro da Forja'),
+            'nomePersonagem': character.get('nomePersonagem', 'Ares'),
+            'nivel': user_profile.get('nivel', 1), 'classe': character.get('classe', 'guerreiro'),
+            'atributos': attrs, 'maxHp': max_hp, 'currentHp': max_hp,
+            'fury': 0, 'rating': user_profile.get('pvpRating', 1000), 'foto': user_profile.get('foto')
+        }
+        _match_add(match_id, {'player1': p1_obj, 'player2': p2_obj, 'created_at': now})
+        return {'matched': True, 'isRealPlayer': True, 'matchId': match_id, 'opponent': p1_obj}
 
-            matched_games[match_id] = {
-                "player1": p1_obj,
-                "player2": p2_obj,
-                "created_at": now
-            }
+    # No real player — add to queue and broadcast challenge to all others
+    _queue_add(user_id, {
+        'userId': user_id, 'nome': user_profile.get('nome', 'Guerreiro da Forja'),
+        'nomePersonagem': character.get('nomePersonagem', 'Ares'),
+        'nivel': user_profile.get('nivel', 1), 'classe': character.get('classe', 'guerreiro'),
+        'atributos': attrs, 'maxHp': max_hp,
+        'rating': user_profile.get('pvpRating', 1000), 'foto': user_profile.get('foto'),
+        'timestamp': now
+    })
 
-            return {
-                "matched": True,
-                "isRealPlayer": True,
-                "matchId": match_id,
-                "opponent": p1_obj
-            }
-
-    # If no real player yet, add self to queue
-    active_match_queue[user_id] = {
-        "userId": user_id,
-        "nome": user_profile.get("nome", "Guerreiro da Forja"),
-        "nomePersonagem": character.get("nomePersonagem", "Ares"),
-        "nivel": user_profile.get("nivel", 1),
-        "classe": character.get("classe", "guerreiro"),
-        "atributos": attrs,
-        "maxHp": max_hp,
-        "rating": user_profile.get("pvpRating", 1000),
-        "foto": user_profile.get("foto"),
-        "timestamp": now
+    challenger_name = user_profile.get('nome', 'Guerreiro da Forja').split()[0]
+    challenge = {
+        'id': f'chal_{int(now)}_{random.randint(10, 99)}',
+        'challengerId': user_id,
+        'challengerName': challenger_name,
+        'characterName': character.get('nomePersonagem', 'Ares'),
+        'level': user_profile.get('nivel', 1),
+        'message': random.choice(CHALLENGE_MESSAGES),
+        'timestamp': now
     }
+    _broadcast_set(challenge)
 
-    # Broadcast notification for all other active users with a creative short challenge
-    challenger_name = user_profile.get("nome", "Guerreiro da Forja").split()[0]
-    active_challenge_broadcast = {
-        "id": f"chal_{int(now)}_{random.randint(10, 99)}",
-        "challengerId": user_id,
-        "challengerName": challenger_name,
-        "characterName": character.get("nomePersonagem", "Ares"),
-        "level": user_profile.get("nivel", 1),
-        "message": random.choice(CHALLENGE_MESSAGES),
-        "timestamp": now
-    }
+    return {'matched': False, 'waiting': True, 'queueTimeSeconds': 20, 'challengeId': challenge['id']}
 
-    return {
-        "matched": False,
-        "waiting": True,
-        "queueTimeSeconds": 20
-    }
-
-def check_queue_status(user_id: str, user_level: int = 1, user_rating: int = 1000):
-    """Checks if a real player was matched within the window, or returns high-tier warrior fallback."""
+def check_queue_status(user_id, user_level=1, user_rating=1000):
     now = time.time()
 
-    # 1. Check if another player matched with this user
-    for m_id, game in list(matched_games.items()):
-        p1 = game.get("player1", {})
-        p2 = game.get("player2", {})
-        if p1.get("userId") == user_id or p2.get("userId") == user_id:
-            opp = p2 if p1.get("userId") == user_id else p1
-            if now - game.get("created_at", now) > 20:
-                del matched_games[m_id]
-            return {
-                "matched": True,
-                "isRealPlayer": True,
-                "matchId": m_id,
-                "opponent": opp
-            }
+    # 1. Check if a match was registered for this user (in Firestore or in-memory)
+    m_id, game = _match_get_for_user(user_id)
+    if game:
+        p1 = game.get('player1', {})
+        p2 = game.get('player2', {})
+        opp = p2 if p1.get('userId') == user_id else p1
+        if now - game.get('created_at', now) > 20:
+            _match_remove(m_id)
+        return {'matched': True, 'isRealPlayer': True, 'matchId': m_id, 'opponent': opp}
 
     # 2. Check if still in queue
-    if user_id in active_match_queue:
-        elapsed = now - active_match_queue[user_id]["timestamp"]
+    entry = _queue_get(user_id)
+    if entry:
+        elapsed = now - entry.get('timestamp', now)
         if elapsed < 20:
-            # Still looking for real users within the 20 seconds
-            return {
-                "matched": False,
-                "waiting": True,
-                "elapsed": round(elapsed, 1),
-                "remaining": max(0, round(20 - elapsed, 1))
-            }
+            return {'matched': False, 'waiting': True, 'elapsed': round(elapsed, 1), 'remaining': max(0, round(20 - elapsed, 1))}
         else:
-            # 20 seconds elapsed: pair with realistic online warrior seamlessly
-            del active_match_queue[user_id]
+            _queue_remove(user_id)
             return generate_high_tier_opponent(user_id, user_level, user_rating)
 
-    # If not in queue, generate realistic warrior
     return generate_high_tier_opponent(user_id, user_level, user_rating)
 
 def generate_high_tier_opponent(user_id: str, user_level: int = 1, user_rating: int = 1000):
@@ -258,51 +332,39 @@ def generate_high_tier_opponent(user_id: str, user_level: int = 1, user_rating: 
         }
     }
 
-def get_active_challenge(current_user_id: str):
-    """Retrieves broadcasted battle challenge with creative short notifications."""
-    global active_challenge_broadcast
+def get_active_challenge(current_user_id):
     now = time.time()
-    
-    if active_challenge_broadcast:
-        if now - active_challenge_broadcast["timestamp"] > 25:
-            active_challenge_broadcast = None
-        elif active_challenge_broadcast["challengerId"] == current_user_id:
-            return {"hasChallenge": False}
-        else:
-            return {
-                "hasChallenge": True,
-                "challenge": active_challenge_broadcast
-            }
 
-    # Spontaneous periodic challenge from active online colosseum warriors (simulating 50-100 active community)
-    # Triggers roughly every 45-75 seconds based on deterministic timestamp slot
+    # 1. Real broadcast from Firestore (visible to all other users)
+    challenge = _broadcast_get()
+    if challenge:
+        if now - challenge.get('timestamp', now) > 25:
+            _broadcast_set(None)
+            challenge = None
+        elif challenge.get('challengerId') != current_user_id:
+            return {'hasChallenge': True, 'challenge': challenge}
+
+    # 2. Periodic simulated challenge to keep arena lively
     slot = int(now // 50)
     slot_seed = slot * 73
     if (slot_seed % 3 == 0) and (now % 50 < 18):
         simulated_names = [
-            ("Leonidas", "Esparta Brutal"),
-            ("Brunhilde", "Titã de Ferro"),
-            ("Kael", "Lâmina Noturna"),
-            ("Athena", "Paladina Sagrada"),
-            ("Gorgon", "Quebrador de Ossos"),
-            ("Zephyr", "Relâmpago da Forja")
+            ('Leonidas', 'Esparta Brutal'), ('Brunhilde', 'Tita de Ferro'),
+            ('Kael', 'Lamina Noturna'), ('Athena', 'Paladina Sagrada'),
+            ('Gorgon', 'Quebrador de Ossos'), ('Zephyr', 'Relampago da Forja')
         ]
         name, char_name = simulated_names[slot % len(simulated_names)]
         msg = CHALLENGE_MESSAGES[slot % len(CHALLENGE_MESSAGES)]
         return {
-            "hasChallenge": True,
-            "challenge": {
-                "id": f"sim_chal_{slot}",
-                "challengerId": f"online_warrior_{slot}",
-                "challengerName": name,
-                "characterName": char_name,
-                "level": max(1, (slot % 12) + 3),
-                "message": msg,
-                "timestamp": now
+            'hasChallenge': True,
+            'challenge': {
+                'id': f'sim_chal_{slot}', 'challengerId': f'online_warrior_{slot}',
+                'challengerName': name, 'characterName': char_name,
+                'level': max(1, (slot % 12) + 3), 'message': msg, 'timestamp': now
             }
         }
 
-    return {"hasChallenge": False}
+    return {'hasChallenge': False}
 
 def process_battle_action(action_type: str, attacker: dict, defender: dict):
     """Calculates combat turn outcome based on fighter attributes."""

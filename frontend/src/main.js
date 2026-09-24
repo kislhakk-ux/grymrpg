@@ -18,7 +18,7 @@ import { closeLevelUpModal } from './components/LevelUpModal.js';
 import { aiChatDrawer } from './components/AIChatDrawer.js';
 
 import { toast } from './components/Toast.js';
-import { apiClient } from './services/api.js';
+import { apiClient, API_BASE_URL } from './services/api.js';
 
 // Setup Global GymForge API on window
 window.gymforge = window.gymforge || {};
@@ -63,10 +63,15 @@ window.gymforge.acceptBattleChallenge = function(toastId) {
   const toastEl = document.getElementById(toastId);
   if (toastEl) toastEl.remove();
   soundService.playClick();
+  // Navigate to arena — the user will click 'Buscar Oponente' themselves
+  // so we don't double-enqueue by calling startMatchmaking() here
   window.location.hash = '#arena';
   setTimeout(() => {
-    window.gymforge.startMatchmaking();
-  }, 300);
+    // Auto-start matchmaking after navigating to arena
+    if (window.gymforge.startMatchmaking) {
+      window.gymforge.startMatchmaking();
+    }
+  }, 400);
 };
 
 // Google Authentication Handlers
@@ -129,24 +134,30 @@ window.gymforge.submitCustomGoogleLogin = function(e) {
   window.gymforge.connectGoogle(email || null, name || null);
 };
 
-// Periodic Global Challenge Broadcast Listener (Apenas para guerreiros com conta conectada)
+// Periodic Global Challenge Broadcast Listener — notifies ALL connected users
 let lastSeenChallengeId = null;
 setInterval(async () => {
   const user = storageService.getUserProfile();
-  // Notifica apenas contas ativas/logadas
-  const isLogged = user && user.email && user.email !== 'heroi@gymforge.app' && !user.isGuest;
-  if (!isLogged) return;
+  if (!user) return;
 
+  // Only skip if we are ourselves in matchmaking state
+  // (we'll hear our own broadcast but challengerId filter on backend blocks it)
   try {
-    const res = await apiClient.request('/api/arena/active-challenge');
+    const headers = { 'Content-Type': 'application/json' };
+    const userId = user.userId || user.email || 'warrior_guest';
+    headers['X-User-Id'] = userId;
+
+    const response = await fetch(`${API_BASE_URL}/api/arena/active-challenge`, { headers });
+    if (!response.ok) return;
+    const res = await response.json();
     if (res && res.hasChallenge && res.challenge && res.challenge.id !== lastSeenChallengeId) {
       lastSeenChallengeId = res.challenge.id;
       toast.showBattleChallenge(res.challenge.challengerName, res.challenge.message);
     }
   } catch {
-    // offline silent
+    // offline or backend down — silent
   }
-}, 2500);
+}, 2000);
 
 // Router Mapping
 const ROUTES = {
