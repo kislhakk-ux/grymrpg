@@ -259,9 +259,21 @@ function renderMatchmakingView() {
   `;
 }
 
-function renderFightingStage(user, character) {
-  const playerHpPercent = Math.max(0, Math.round((playerHp / playerMaxHp) * 100));
-  const oppHpPercent = Math.max(0, Math.round((opponentHp / opponentMaxHp) * 100));
+function renderFightingStage(user = {}, character = {}) {
+  const opp = currentOpponent || {
+    nome: "Guerreiro do Coliseu",
+    nomePersonagem: "Titã da Arena",
+    nivel: user?.nivel || 1,
+    classe: "guerreiro",
+    atributos: { FORCA: 12, RESISTENCIA: 10, AGILIDADE: 8, VITALIDADE: 10, DISCIPLINA: 8 }
+  };
+  const oppName = opp.nomePersonagem || opp.nome || "Guerreiro Rival";
+  const charName = character?.nomePersonagem || "Seu Herói";
+
+  const safePlayerMaxHp = Math.max(1, playerMaxHp || 100);
+  const safeOppMaxHp = Math.max(1, opponentMaxHp || 100);
+  const playerHpPercent = Math.max(0, Math.min(100, Math.round((playerHp / safePlayerMaxHp) * 100)));
+  const oppHpPercent = Math.max(0, Math.min(100, Math.round((opponentHp / safeOppMaxHp) * 100)));
 
   return `
     <div id="battle-arena-stage" class="space-y-6 animate-fadeIn select-none">
@@ -274,8 +286,8 @@ function renderFightingStage(user, character) {
           <!-- Player Side (Left 5 Cols) -->
           <div class="col-span-5 space-y-2">
             <div class="flex items-center justify-between text-xs font-mono font-bold">
-              <span class="text-amber-400 truncate">${character.nomePersonagem}</span>
-              <span class="text-emerald-400">${playerHp} / ${playerMaxHp} HP</span>
+              <span class="text-amber-400 truncate">${charName}</span>
+              <span class="text-emerald-400">${playerHp} / ${safePlayerMaxHp} HP</span>
             </div>
 
             <!-- Player Health Bar (Mortal Kombat Style) -->
@@ -304,8 +316,8 @@ function renderFightingStage(user, character) {
           <!-- Opponent Side (Right 5 Cols) -->
           <div class="col-span-5 space-y-2 text-right">
             <div class="flex items-center justify-between text-xs font-mono font-bold">
-              <span class="text-rose-400">${opponentHp} / ${opponentMaxHp} HP</span>
-              <span class="text-slate-200 truncate">${currentOpponent.nomePersonagem}</span>
+              <span class="text-rose-400">${opponentHp} / ${safeOppMaxHp} HP</span>
+              <span class="text-slate-200 truncate">${oppName}</span>
             </div>
 
             <!-- Opponent Health Bar -->
@@ -351,7 +363,7 @@ function renderFightingStage(user, character) {
         <!-- Right Fighter (Opponent) -->
         <div id="opponent-avatar-stage" class="relative z-10 flex flex-col items-center transition-transform duration-200">
           <div class="transform scale-110 -scale-x-100">
-            ${renderCharacterAvatar({ atributos: currentOpponent.atributos, customizacaoVisual: { pele: '#e0ac69', corCabelo: '#ef4444' } }, currentOpponent, { size: 160, showAura: true, interactive: false })}
+            ${renderCharacterAvatar({ atributos: opp.atributos || { FORCA: 12, RESISTENCIA: 10 }, customizacaoVisual: { pele: '#e0ac69', corCabelo: '#ef4444' } }, opp, { size: 160, showAura: true, interactive: false })}
           </div>
           ${isOpponentBlocking ? `
             <span class="px-2.5 py-0.5 rounded-full bg-blue-500 text-forge-950 font-bold font-mono text-[10px] shadow-glow-cyan animate-bounce mt-1">
@@ -648,17 +660,27 @@ window.gymforge.startMatchmaking = async function() {
 };
 
 function launchBattle(opponent, matchId) {
-  const user = storageService.getUserProfile();
-  const character = storageService.getCharacter();
+  const user = storageService.getUserProfile() || {};
+  const character = storageService.getCharacter() || {};
   const attrs = character.atributos || { VITALIDADE: 10 };
 
-  currentOpponent = opponent;
-  currentMatch = matchId;
+  currentOpponent = opponent || {
+    nome: "Leonidas do Aço",
+    nomePersonagem: "Esparta Brutal",
+    nivel: user?.nivel || 1,
+    classe: "guerreiro",
+    atributos: { FORCA: 14, RESISTENCIA: 12, AGILIDADE: 8, VITALIDADE: 12, DISCIPLINA: 10 },
+    maxHp: 250,
+    currentHp: 250,
+    fury: 0,
+    rating: (user.pvpRating || 1000) + 10
+  };
+  currentMatch = matchId || `match_${Date.now()}`;
 
-  playerMaxHp = 100 + (attrs.VITALIDADE * 15) + ((user.nivel || 1) * 10);
+  playerMaxHp = 100 + ((attrs.VITALIDADE || 10) * 15) + ((user.nivel || 1) * 10);
   playerHp = playerMaxHp;
   playerFury = 0;
-  opponentMaxHp = currentOpponent.maxHp || 250;
+  opponentMaxHp = currentOpponent.maxHp || (100 + ((currentOpponent.atributos?.VITALIDADE || 10) * 15) + ((currentOpponent.nivel || 1) * 10)) || 250;
   opponentHp = opponentMaxHp;
   opponentFury = 0;
   combatLogs = ["⚔️ O árbitro da arena sinaliza o início do combate! FIGHT!"];
@@ -685,8 +707,8 @@ window.gymforge.executeBattleAction = function(actionType) {
   if (!isPlayerTurn) return;
 
   isPlayerTurn = false;
-  const user = storageService.getUserProfile();
-  const character = storageService.getCharacter();
+  const user = storageService.getUserProfile() || {};
+  const character = storageService.getCharacter() || {};
   const attrs = character.atributos || { FORCA: 10, RESISTENCIA: 8, AGILIDADE: 6, VITALIDADE: 10, DISCIPLINA: 8 };
 
   let damage = 0;
@@ -697,7 +719,7 @@ window.gymforge.executeBattleAction = function(actionType) {
     soundService.playBlock();
     isPlayerBlocking = true;
     playerFury = Math.min(100, playerFury + 20);
-    logText = `🛡️ ${character.nomePersonagem} assumiu Postura Defensiva (+20% Fúria)!`;
+    logText = `🛡️ ${character.nomePersonagem || 'Seu Herói'} assumiu Postura Defensiva (+20% Fúria)!`;
     combatLogs.unshift(logText);
   } else {
     isPlayerBlocking = false;
@@ -705,20 +727,20 @@ window.gymforge.executeBattleAction = function(actionType) {
       soundService.playHit();
       damage = (attrs.FORCA * 1.4) + (attrs.AGILIDADE * 1.6) + Math.floor(Math.random() * 8);
       playerFury = Math.min(100, playerFury + 15);
-      logText = `⚔️ ${character.nomePersonagem} desferiu um Golpe Rápido veloz causando ${Math.round(damage)} de dano!`;
+      logText = `⚔️ ${character.nomePersonagem || 'Seu Herói'} desferiu um Golpe Rápido veloz causando ${Math.round(damage)} de dano!`;
     } else if (actionType === 'heavy_strike') {
       soundService.playHeavyHit();
       isCrit = Math.random() < 0.3;
-      damage = ((attrs.FORCA * 2.8) + (user.nivel * 3)) * (isCrit ? 1.8 : 1.0);
+      damage = ((attrs.FORCA * 2.8) + ((user.nivel || 1) * 3)) * (isCrit ? 1.8 : 1.0);
       playerFury = Math.min(100, playerFury + 25);
       logText = isCrit 
-        ? `🔥 GOLPE CRÍTICO! ${character.nomePersonagem} acertou uma Pancada Pesada devastadora causando ${Math.round(damage)} de dano!`
-        : `🔨 ${character.nomePersonagem} acertou uma Pancada Pesada causando ${Math.round(damage)} de dano!`;
+        ? `🔥 GOLPE CRÍTICO! ${character.nomePersonagem || 'Seu Herói'} acertou uma Pancada Pesada devastadora causando ${Math.round(damage)} de dano!`
+        : `🔨 ${character.nomePersonagem || 'Seu Herói'} acertou uma Pancada Pesada causando ${Math.round(damage)} de dano!`;
     } else if (actionType === 'forge_ultimate') {
       soundService.playSpecial();
       damage = (attrs.FORCA * 4.0) + (attrs.DISCIPLINA * 2.5) + 30;
       playerFury = 0;
-      logText = `⚡ FÚRIA SUPREMA DA FORJA! ${character.nomePersonagem} liberou todo o seu poder causando ${Math.round(damage)} de dano explosivo!`;
+      logText = `⚡ FÚRIA SUPREMA DA FORJA! ${character.nomePersonagem || 'Seu Herói'} liberou todo o seu poder causando ${Math.round(damage)} de dano explosivo!`;
     }
 
     if (isOpponentBlocking) {
@@ -751,7 +773,12 @@ window.gymforge.executeBattleAction = function(actionType) {
 };
 
 function executeOpponentTurn() {
-  const oppAttrs = currentOpponent.atributos || { FORCA: 12, RESISTENCIA: 10, AGILIDADE: 10, VITALIDADE: 12, DISCIPLINA: 10 };
+  const opp = currentOpponent || {
+    nomePersonagem: "Adversário",
+    atributos: { FORCA: 12, RESISTENCIA: 10, AGILIDADE: 10, VITALIDADE: 12, DISCIPLINA: 10 }
+  };
+  const oppAttrs = opp.atributos || { FORCA: 12, RESISTENCIA: 10, AGILIDADE: 10, VITALIDADE: 12, DISCIPLINA: 10 };
+  const oppName = opp.nomePersonagem || opp.nome || "Adversário";
   const rand = Math.random();
   let damage = 0;
   let isCrit = false;
@@ -761,25 +788,25 @@ function executeOpponentTurn() {
     soundService.playSpecial();
     damage = (oppAttrs.FORCA * 3.5) + (oppAttrs.DISCIPLINA * 2.0) + 20;
     opponentFury = 0;
-    logText = `⚡ ${currentOpponent.nomePersonagem} disparou seu Ataque Especial Supremo causando ${Math.round(damage)} de dano!`;
+    logText = `⚡ ${oppName} disparou seu Ataque Especial Supremo causando ${Math.round(damage)} de dano!`;
   } else if (rand < 0.25) {
     soundService.playBlock();
     isOpponentBlocking = true;
     opponentFury = Math.min(100, opponentFury + 20);
-    logText = `🛡️ ${currentOpponent.nomePersonagem} ergueu seu escudo em Bloqueio!`;
+    logText = `🛡️ ${oppName} ergueu seu escudo em Bloqueio!`;
   } else if (rand < 0.70) {
     soundService.playHit();
     damage = (oppAttrs.FORCA * 1.3) + (oppAttrs.AGILIDADE * 1.4) + Math.floor(Math.random() * 6);
     opponentFury = Math.min(100, opponentFury + 15);
-    logText = `⚔️ ${currentOpponent.nomePersonagem} atacou rapidamente causando ${Math.round(damage)} de dano!`;
+    logText = `⚔️ ${oppName} atacou rapidamente causando ${Math.round(damage)} de dano!`;
   } else {
     soundService.playHeavyHit();
     isCrit = Math.random() < 0.25;
     damage = (oppAttrs.FORCA * 2.5) * (isCrit ? 1.7 : 1.0);
     opponentFury = Math.min(100, opponentFury + 25);
     logText = isCrit 
-      ? `🔥 CRÍTICO DO ADVERSÁRIO! ${currentOpponent.nomePersonagem} atingiu você em cheio causando ${Math.round(damage)} de dano!`
-      : `🔨 ${currentOpponent.nomePersonagem} deferiu um golpe pesado causando ${Math.round(damage)} de dano!`;
+      ? `🔥 CRÍTICO DO ADVERSÁRIO! ${oppName} atingiu você em cheio causando ${Math.round(damage)} de dano!`
+      : `🔨 ${oppName} deferiu um golpe pesado causando ${Math.round(damage)} de dano!`;
   }
 
   if (isPlayerBlocking) {

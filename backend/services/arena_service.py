@@ -102,35 +102,50 @@ def register_matchmaking_request(user_id: str, user_profile: dict, character: di
             del active_match_queue[uid]
 
     # Check if another REAL user is already in the queue waiting
-    for uid, candidate in active_match_queue.items():
+    for uid, candidate in list(active_match_queue.items()):
         if uid != user_id:
             # Match found with REAL player!
             del active_match_queue[uid]
             match_id = f"match_real_{int(now)}_{random.randint(100, 999)}"
             
+            p1_obj = {
+                "userId": candidate["userId"],
+                "nome": candidate["nome"],
+                "nomePersonagem": candidate["nomePersonagem"],
+                "nivel": candidate["nivel"],
+                "classe": candidate["classe"],
+                "atributos": candidate["atributos"],
+                "maxHp": candidate["maxHp"],
+                "currentHp": candidate["maxHp"],
+                "fury": 0,
+                "rating": candidate["rating"],
+                "foto": candidate.get("foto")
+            }
+            p2_obj = {
+                "userId": user_id,
+                "nome": user_profile.get("nome", "Guerreiro da Forja"),
+                "nomePersonagem": character.get("nomePersonagem", "Ares"),
+                "nivel": user_profile.get("nivel", 1),
+                "classe": character.get("classe", "guerreiro"),
+                "atributos": attrs,
+                "maxHp": max_hp,
+                "currentHp": max_hp,
+                "fury": 0,
+                "rating": user_profile.get("pvpRating", 1000),
+                "foto": user_profile.get("foto")
+            }
+
             matched_games[match_id] = {
-                "player1_id": uid,
-                "player2_id": user_id,
-                "status": "ready"
+                "player1": p1_obj,
+                "player2": p2_obj,
+                "created_at": now
             }
 
             return {
                 "matched": True,
                 "isRealPlayer": True,
                 "matchId": match_id,
-                "opponent": {
-                    "userId": candidate["userId"],
-                    "nome": candidate["nome"],
-                    "nomePersonagem": candidate["nomePersonagem"],
-                    "nivel": candidate["nivel"],
-                    "classe": candidate["classe"],
-                    "atributos": candidate["atributos"],
-                    "maxHp": candidate["maxHp"],
-                    "currentHp": candidate["maxHp"],
-                    "fury": 0,
-                    "rating": candidate["rating"],
-                    "foto": candidate["foto"]
-                }
+                "opponent": p1_obj
             }
 
     # If no real player yet, add self to queue
@@ -170,15 +185,18 @@ def check_queue_status(user_id: str, user_level: int = 1, user_rating: int = 100
     now = time.time()
 
     # 1. Check if another player matched with this user
-    for m_id, game in matched_games.items():
-        if game.get("player1_id") == user_id or game.get("player2_id") == user_id:
-            opp_id = game["player1_id"] if game["player2_id"] == user_id else game["player2_id"]
-            # Clean match from memory
-            del matched_games[m_id]
+    for m_id, game in list(matched_games.items()):
+        p1 = game.get("player1", {})
+        p2 = game.get("player2", {})
+        if p1.get("userId") == user_id or p2.get("userId") == user_id:
+            opp = p2 if p1.get("userId") == user_id else p1
+            if now - game.get("created_at", now) > 20:
+                del matched_games[m_id]
             return {
                 "matched": True,
                 "isRealPlayer": True,
-                "matchId": m_id
+                "matchId": m_id,
+                "opponent": opp
             }
 
     # 2. Check if still in queue
