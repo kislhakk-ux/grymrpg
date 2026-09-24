@@ -1,5 +1,6 @@
 // GymForge — API Client Service
 import { auth, isFirebaseConfigured } from './firebase.js';
+import { storageService } from './storageService.js';
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000';
 
@@ -9,8 +10,10 @@ class ApiClient {
   }
 
   async getAuthHeaders() {
+    const user = storageService.getUserProfile();
     const headers = {
-      'Content-Type': 'application/json'
+      'Content-Type': 'application/json',
+      'X-User-Id': user?.userId || 'warrior_guest'
     };
 
     if (isFirebaseConfigured && auth && auth.currentUser) {

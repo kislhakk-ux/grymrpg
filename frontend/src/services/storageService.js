@@ -457,13 +457,26 @@ class StorageService {
   getUserProfile() {
     const raw = localStorage.getItem(STORAGE_KEYS.USER_PROFILE);
     if (!raw) {
-      this.saveUserProfile(DEFAULT_USER_PROFILE);
-      return { ...DEFAULT_USER_PROFILE };
+      const initialProfile = {
+        ...DEFAULT_USER_PROFILE,
+        userId: `warrior_${Date.now()}_${Math.floor(Math.random() * 9000 + 1000)}`
+      };
+      this.saveUserProfile(initialProfile);
+      return initialProfile;
     }
     try {
-      return JSON.parse(raw);
+      const profile = JSON.parse(raw);
+      if (!profile.userId || profile.userId === 'warrior_demo_1') {
+        profile.userId = `warrior_${Date.now()}_${Math.floor(Math.random() * 9000 + 1000)}`;
+        this.saveUserProfile(profile);
+      }
+      return profile;
     } catch {
-      return { ...DEFAULT_USER_PROFILE };
+      const initialProfile = {
+        ...DEFAULT_USER_PROFILE,
+        userId: `warrior_${Date.now()}_${Math.floor(Math.random() * 9000 + 1000)}`
+      };
+      return initialProfile;
     }
   }
 

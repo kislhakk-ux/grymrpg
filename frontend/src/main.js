@@ -79,7 +79,7 @@ setInterval(async () => {
   } catch {
     // offline silent
   }
-}, 5000);
+}, 2500);
 
 // Router Mapping
 const ROUTES = {

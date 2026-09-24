@@ -31,7 +31,8 @@ def online_count():
 @router.post("/matchmake")
 def search_opponent(req: MatchmakingInitRequest, user_id: str = Depends(get_current_user_id)):
     """Registers user in the real matchmaking queue and broadcasts challenge."""
-    return register_matchmaking_request(user_id, req.userProfile, req.character)
+    uid = req.userProfile.get("userId") or user_id
+    return register_matchmaking_request(uid, req.userProfile, req.character)
 
 @router.get("/match-status")
 def match_status(userLevel: int = 1, userRating: int = 1000, user_id: str = Depends(get_current_user_id)):

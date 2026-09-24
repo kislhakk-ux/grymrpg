@@ -5,25 +5,28 @@ from database.firestore_db import is_firestore_connected
 
 security = HTTPBearer(auto_error=False)
 
-async def get_current_user_id(credentials: HTTPAuthorizationCredentials = Security(security)) -> str:
-    """Verifies Firebase JWT token or grants access in local development mode."""
-    if not credentials:
-        # Default fallback for development/demo
-        return "warrior_demo_1"
+async def get_current_user_id(request: Request, credentials: HTTPAuthorizationCredentials = Security(security)) -> str:
+    """Verifies Firebase JWT token or extracts client user ID from headers/params."""
+    # 1. Custom Header from frontend
+    x_user_id = request.headers.get("x-user-id")
+    if x_user_id and x_user_id.strip():
+        return x_user_id.strip()
 
-    token = credentials.credentials
-    if not token:
-        return "warrior_demo_1"
+    # 2. Query Parameter
+    q_user_id = request.query_params.get("userId")
+    if q_user_id and q_user_id.strip():
+        return q_user_id.strip()
 
-    # If Firebase Admin is initialized
-    if is_firestore_connected:
-        try:
-            from firebase_admin import auth
-            decoded = auth.verify_id_token(token)
-            return decoded["uid"]
-        except Exception as e:
-            # If token verification fails in production, deny
-            raise HTTPException(status_code=401, detail=f"Token de autenticação inválido ou expirado: {e}")
+    # 3. Firebase Token
+    if credentials and credentials.credentials:
+        token = credentials.credentials
+        if is_firestore_connected:
+            try:
+                from firebase_admin import auth
+                decoded = auth.verify_id_token(token)
+                return decoded["uid"]
+            except Exception as e:
+                raise HTTPException(status_code=401, detail=f"Token de autenticação inválido ou expirado: {e}")
+        return token
 
-    # In local development mode, if token is provided, extract custom demo UID or default
     return "warrior_demo_1"
