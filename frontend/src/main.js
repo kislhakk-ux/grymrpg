@@ -67,9 +67,14 @@ window.gymforge.acceptBattleChallenge = function(toastId) {
   }, 300);
 };
 
-// Periodic Global Challenge Broadcast Listener
+// Periodic Global Challenge Broadcast Listener (Apenas para guerreiros com conta conectada)
 let lastSeenChallengeId = null;
 setInterval(async () => {
+  const user = storageService.getUserProfile();
+  // Notifica apenas contas ativas/logadas
+  const isLogged = user && user.email && user.email !== 'heroi@gymforge.app';
+  if (!isLogged) return;
+
   try {
     const res = await apiClient.request('/api/arena/active-challenge');
     if (res && res.hasChallenge && res.challenge && res.challenge.id !== lastSeenChallengeId) {
