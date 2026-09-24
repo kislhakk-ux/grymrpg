@@ -46,7 +46,7 @@ export function renderProfilePage() {
 
           <div>
             ${isGuest ? `
-              <button onclick="window.gymforge.connectGoogle()" class="py-2.5 px-5 rounded-xl btn-forge text-xs font-bold shadow-glow-gold flex items-center gap-2">
+              <button onclick="window.gymforge.openAuthModal()" class="py-2.5 px-5 rounded-xl btn-forge text-xs font-bold shadow-glow-gold flex items-center gap-2">
                 <span>🔐</span>
                 <span>Entrar com Google</span>
               </button>

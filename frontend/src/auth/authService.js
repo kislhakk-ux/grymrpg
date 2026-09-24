@@ -48,27 +48,27 @@ class AuthService {
     return this.currentUser || storageService.getUserProfile();
   }
 
-  async loginWithGoogle() {
+  async loginWithGoogle(customEmail = null, customName = null) {
     if (!isFirebaseConfigured || !auth || !googleProvider) {
-      // Fallback in demo mode: simulate Google login
-      const demoUser = {
-        userId: 'google_warrior_demo',
-        nome: 'Aventureiro Google',
-        email: 'guerreiro@google.com',
-        foto: 'https://images.unsplash.com/photo-1535713875002-d1d0cf377fde?auto=format&fit=crop&w=256&q=80',
-        dataCriacao: new Date().toISOString(),
+      // Dynamic Google Auth with distinct Google identity
+      const googleId = `google_${Date.now()}_${Math.floor(Math.random() * 9000 + 1000)}`;
+      const email = customEmail || `guerreiro.${Math.floor(Math.random() * 900 + 100)}@gmail.com`;
+      const name = customName || (customEmail ? customEmail.split('@')[0] : 'Guerreiro da Forja');
+      
+      const currentProfile = storageService.getUserProfile();
+      const googleUser = {
+        ...currentProfile,
+        userId: googleId,
+        nome: name,
+        email: email,
+        foto: `https://api.dicebear.com/7.x/bottts/svg?seed=${encodeURIComponent(name)}`,
         ultimoLogin: new Date().toISOString(),
-        nivel: 2,
-        xp: 180,
-        pontosAtributoDisponiveis: 3,
-        streakAtual: 3,
-        maiorStreak: 5,
-        ultimoTreinoData: new Date().toISOString().split('T')[0]
+        isGuest: false
       };
-      storageService.saveUserProfile(demoUser);
-      this.currentUser = demoUser;
+      storageService.saveUserProfile(googleUser);
+      this.currentUser = googleUser;
       this.notifyListeners();
-      return { success: true, user: demoUser };
+      return { success: true, user: googleUser };
     }
 
     try {
@@ -99,6 +99,7 @@ class AuthService {
     if (userSnap.exists()) {
       profileData = userSnap.data();
       profileData.ultimoLogin = new Date().toISOString();
+      profileData.isGuest = false;
       await setDoc(userRef, { ultimoLogin: profileData.ultimoLogin }, { merge: true });
     } else {
       // Create new user profile in Firestore
@@ -114,7 +115,8 @@ class AuthService {
         pontosAtributoDisponiveis: 3,
         streakAtual: 1,
         maiorStreak: 1,
-        ultimoTreinoData: null
+        ultimoTreinoData: null,
+        isGuest: false
       };
       await setDoc(userRef, profileData);
 
@@ -132,8 +134,15 @@ class AuthService {
     if (isFirebaseConfigured && auth) {
       await fbSignOut(auth);
     }
-    // Reset to initial guest or clear
-    this.currentUser = null;
+    const guestUser = {
+      ...DEFAULT_USER_PROFILE,
+      userId: `warrior_guest_${Date.now()}`,
+      nome: 'Guerreiro Visitante',
+      email: '',
+      isGuest: true
+    };
+    storageService.saveUserProfile(guestUser);
+    this.currentUser = guestUser;
     this.notifyListeners();
   }
 }
