@@ -2,11 +2,25 @@
 import { auth, isFirebaseConfigured } from './firebase.js';
 import { storageService } from './storageService.js';
 
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000';
+function resolveApiBaseUrl() {
+  if (import.meta.env.VITE_API_BASE_URL && !import.meta.env.VITE_API_BASE_URL.includes('localhost')) {
+    return import.meta.env.VITE_API_BASE_URL;
+  }
+  if (typeof window !== 'undefined') {
+    const host = window.location.hostname;
+    if (host.includes('onrender.com') || host.includes('netlify.app')) {
+      return 'https://grymrpg.onrender.com';
+    }
+  }
+  return import.meta.env.VITE_API_BASE_URL || 'http://localhost:8000';
+}
+
+const API_BASE_URL = resolveApiBaseUrl();
 
 class ApiClient {
   constructor() {
     this.baseUrl = API_BASE_URL;
+    console.log(`[GymForge API] Conectado a: ${this.baseUrl}`);
   }
 
   async getAuthHeaders() {
