@@ -206,6 +206,31 @@ def _match_remove(match_id):
     _mem_games.pop(match_id, None)
 
 
+def _match_get(match_id):
+    global _mem_games
+    if is_firestore_connected:
+        try:
+            doc = get_db().collection(FS_MATCHES_COL).document(match_id).get()
+            return doc.to_dict() if doc.exists else None
+        except Exception as e:
+            print(f'[Arena] match_get Firestore failed: {e}')
+    return _mem_games.get(match_id)
+
+
+def _match_update_state(match_id, new_state):
+    global _mem_games
+    if is_firestore_connected:
+        try:
+            get_db().collection(FS_MATCHES_COL).document(match_id).update({'battleState': new_state})
+            return
+        except Exception as e:
+            print(f'[Arena] match_update_state Firestore failed: {e}')
+    if match_id in _mem_games:
+        _mem_games[match_id]['battleState'] = new_state
+    else:
+        _mem_games[match_id] = {'battleState': new_state}
+
+
 # ---- Main Service Functions ----
 
 def register_matchmaking_request(user_id, user_profile, character):
@@ -240,7 +265,17 @@ def register_matchmaking_request(user_id, user_profile, character):
             'atributos': attrs, 'maxHp': max_hp, 'currentHp': max_hp,
             'fury': 0, 'rating': user_profile.get('pvpRating', 1000), 'foto': user_profile.get('foto')
         }
-        _match_add(match_id, {'player1': p1_obj, 'player2': p2_obj, 'created_at': now})
+        initial_state = {
+            'player1Hp': p1_obj['maxHp'], 'player2Hp': p2_obj['maxHp'],
+            'player1Fury': 0, 'player2Fury': 0,
+            'player1Blocking': False, 'player2Blocking': False,
+            'currentTurnUserId': candidate['userId'],  # waiting player goes first
+            'lastActionResult': None,
+            'combatLog': ['O arbitro sinalizou o inicio do combate! FIGHT!'],
+            'status': 'active', 'winner': None,
+            'lastUpdated': now
+        }
+        _match_add(match_id, {'player1': p1_obj, 'player2': p2_obj, 'created_at': now, 'battleState': initial_state})
         return {'matched': True, 'isRealPlayer': True, 'matchId': match_id, 'opponent': p1_obj}
 
     # No real player — add to queue and broadcast challenge to all others
@@ -333,38 +368,19 @@ def generate_high_tier_opponent(user_id: str, user_level: int = 1, user_rating: 
     }
 
 def get_active_challenge(current_user_id):
+    """Returns ONLY real player challenges - no simulated/fake broadcasts."""
     now = time.time()
-
-    # 1. Real broadcast from Firestore (visible to all other users)
     challenge = _broadcast_get()
-    if challenge:
-        if now - challenge.get('timestamp', now) > 25:
-            _broadcast_set(None)
-            challenge = None
-        elif challenge.get('challengerId') != current_user_id:
-            return {'hasChallenge': True, 'challenge': challenge}
-
-    # 2. Periodic simulated challenge to keep arena lively
-    slot = int(now // 50)
-    slot_seed = slot * 73
-    if (slot_seed % 3 == 0) and (now % 50 < 18):
-        simulated_names = [
-            ('Leonidas', 'Esparta Brutal'), ('Brunhilde', 'Tita de Ferro'),
-            ('Kael', 'Lamina Noturna'), ('Athena', 'Paladina Sagrada'),
-            ('Gorgon', 'Quebrador de Ossos'), ('Zephyr', 'Relampago da Forja')
-        ]
-        name, char_name = simulated_names[slot % len(simulated_names)]
-        msg = CHALLENGE_MESSAGES[slot % len(CHALLENGE_MESSAGES)]
-        return {
-            'hasChallenge': True,
-            'challenge': {
-                'id': f'sim_chal_{slot}', 'challengerId': f'online_warrior_{slot}',
-                'challengerName': name, 'characterName': char_name,
-                'level': max(1, (slot % 12) + 3), 'message': msg, 'timestamp': now
-            }
-        }
-
-    return {'hasChallenge': False}
+    if not challenge:
+        return {'hasChallenge': False}
+    # Expire after 25 seconds
+    if now - challenge.get('timestamp', now) > 25:
+        _broadcast_set(None)
+        return {'hasChallenge': False}
+    # Don't notify the challenger themselves
+    if challenge.get('challengerId') == current_user_id:
+        return {'hasChallenge': False}
+    return {'hasChallenge': True, 'challenge': challenge}
 
 def process_battle_action(action_type: str, attacker: dict, defender: dict):
     """Calculates combat turn outcome based on fighter attributes."""
@@ -450,6 +466,100 @@ def process_battle_action(action_type: str, attacker: dict, defender: dict):
         "furyGain": fury_gain,
         "message": msg
     }
+
+def submit_match_action(match_id, actor_user_id, action_type):
+    """Process and persist a real PVP battle action to Firestore."""
+    match = _match_get(match_id)
+    if not match:
+        return {'error': 'Match not found', 'code': 404}
+
+    state = match.get('battleState', {})
+    if state.get('status') != 'active':
+        return {'error': 'Match not active', 'code': 400}
+    if state.get('currentTurnUserId') != actor_user_id:
+        return {'error': 'Not your turn', 'code': 400}
+
+    p1 = match.get('player1', {})
+    p2 = match.get('player2', {})
+    is_p1 = p1.get('userId') == actor_user_id
+
+    attacker = dict(p1 if is_p1 else p2)
+    defender = dict(p2 if is_p1 else p1)
+
+    atk_hp_key = 'player1Hp' if is_p1 else 'player2Hp'
+    atk_fury_key = 'player1Fury' if is_p1 else 'player2Fury'
+    atk_block_key = 'player1Blocking' if is_p1 else 'player2Blocking'
+    def_hp_key = 'player2Hp' if is_p1 else 'player1Hp'
+    def_fury_key = 'player2Fury' if is_p1 else 'player1Fury'
+    def_block_key = 'player2Blocking' if is_p1 else 'player1Blocking'
+
+    attacker['currentHp'] = state.get(atk_hp_key, attacker.get('maxHp', 100))
+    attacker['fury'] = state.get(atk_fury_key, 0)
+    defender['isBlocking'] = state.get(def_block_key, False)
+
+    result = process_battle_action(action_type, attacker, defender)
+
+    # Update HP
+    new_def_hp = max(0, state.get(def_hp_key, defender.get('maxHp', 100)) - result.get('damage', 0))
+    # Update fury
+    fury_gain = result.get('furyGain', 0)
+    new_atk_fury = 0 if action_type == 'forge_ultimate' else max(0, min(100, state.get(atk_fury_key, 0) + fury_gain))
+    # Update blocking
+    new_atk_blocking = (action_type == 'iron_block')
+    new_def_blocking = False  # consumed
+
+    # Win check
+    new_status = 'active'
+    winner_id = None
+    if new_def_hp <= 0:
+        new_status = 'finished'
+        winner_id = actor_user_id
+
+    # Switch turns
+    next_turn = p2.get('userId') if is_p1 else p1.get('userId')
+
+    # Combat log
+    log_entry = result.get('message', '')
+    new_log = [log_entry] + state.get('combatLog', [])[:19]
+
+    new_state = dict(state)
+    new_state.update({
+        def_hp_key: new_def_hp,
+        atk_fury_key: new_atk_fury,
+        atk_block_key: new_atk_blocking,
+        def_block_key: new_def_blocking,
+        'currentTurnUserId': next_turn if new_status == 'active' else None,
+        'lastActionResult': {**result, 'actorUserId': actor_user_id, 'actionType': action_type, 'ts': time.time()},
+        'combatLog': new_log,
+        'status': new_status,
+        'winner': winner_id,
+        'lastUpdated': time.time()
+    })
+
+    _match_update_state(match_id, new_state)
+    return {'success': True, 'actionResult': result, 'newState': new_state}
+
+
+def get_match_state(match_id, user_id):
+    """Returns current synced battle state for real-time polling."""
+    match = _match_get(match_id)
+    if not match:
+        return {'error': 'Match not found'}
+    p1 = match.get('player1', {})
+    p2 = match.get('player2', {})
+    state = match.get('battleState', {})
+    is_p1 = p1.get('userId') == user_id
+    return {
+        'matchId': match_id,
+        'isPlayer1': is_p1,
+        'isMyTurn': state.get('currentTurnUserId') == user_id,
+        'state': state,
+        'player1': p1,
+        'player2': p2,
+        'status': state.get('status', 'active'),
+        'winner': state.get('winner')
+    }
+
 
 def get_arena_leaderboard():
     """Retrieves current global PVP Leaderboard rankings."""

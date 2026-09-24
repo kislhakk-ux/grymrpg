@@ -1,5 +1,5 @@
 # GymForge — Arena & PVP Routes
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from typing import Dict, Any, Optional
 from services.arena_service import (
@@ -8,7 +8,9 @@ from services.arena_service import (
     get_active_challenge,
     get_online_warriors_count,
     process_battle_action,
-    get_arena_leaderboard
+    get_arena_leaderboard,
+    submit_match_action,
+    get_match_state
 )
 from middleware.auth_middleware import get_current_user_id
 
@@ -22,6 +24,10 @@ class BattleTurnRequest(BaseModel):
     actionType: str
     attacker: Dict[str, Any]
     defender: Dict[str, Any]
+
+class MatchActionRequest(BaseModel):
+    actionType: str
+    userId: str
 
 @router.get("/online-count")
 def online_count():
@@ -41,12 +47,31 @@ def match_status(userLevel: int = 1, userRating: int = 1000, user_id: str = Depe
 
 @router.get("/active-challenge")
 def active_challenge(user_id: str = Depends(get_current_user_id)):
-    """Retrieves active broadcasted challenge for other players."""
+    """Retrieves active REAL player broadcasted challenge (no simulated ones)."""
     return get_active_challenge(user_id)
 
 @router.post("/turn")
 def battle_turn(req: BattleTurnRequest, user_id: str = Depends(get_current_user_id)):
     return process_battle_action(req.actionType, req.attacker, req.defender)
+
+@router.post("/match/{match_id}/action")
+def match_action(match_id: str, req: MatchActionRequest, user_id: str = Depends(get_current_user_id)):
+    """Submit a battle action for a real PVP match (synced via Firestore)."""
+    actor_id = req.userId or user_id
+    result = submit_match_action(match_id, actor_id, req.actionType)
+    if result.get('code') == 404:
+        raise HTTPException(status_code=404, detail=result.get('error'))
+    if result.get('code') == 400:
+        raise HTTPException(status_code=400, detail=result.get('error'))
+    return result
+
+@router.get("/match/{match_id}/state")
+def match_state(match_id: str, user_id: str = Depends(get_current_user_id)):
+    """Poll current battle state for real-time synchronization."""
+    result = get_match_state(match_id, user_id)
+    if result.get('error') == 'Match not found':
+        raise HTTPException(status_code=404, detail="Match not found")
+    return result
 
 @router.get("/leaderboard")
 def leaderboard():

@@ -1,9 +1,9 @@
-// GymForge — PVP Battle Arena with 20s Real Matchmaking & Online Warriors
+// GymForge — PVP Battle Arena with Real-Time Sync
 import { storageService } from '../services/storageService.js';
 import { renderCharacterAvatar } from '../components/CharacterAvatar.js';
 import { soundService } from '../services/soundService.js';
 import { toast } from '../components/Toast.js';
-import { apiClient } from '../services/api.js';
+import { apiClient, API_BASE_URL } from '../services/api.js';
 
 // Arena State
 let arenaState = 'lobby'; // 'lobby', 'matchmaking', 'battle', 'result'
@@ -24,6 +24,12 @@ let activeTab = 'arena'; // 'arena', 'ranking'
 
 let matchmakingInterval = null;
 let matchmakingSecondsRemaining = 20;
+
+// Real PVP Sync
+let isRealPlayerMatch = false;
+let myUserId = null;
+let matchSyncInterval = null;
+let lastSyncTs = 0;
 
 export function getOnlineWarriorsCount() {
   const now = Date.now();
@@ -597,7 +603,7 @@ window.gymforge.startMatchmaking = async function() {
       body: JSON.stringify({ userProfile: user, character })
     });
     if (initRes.matched && initRes.opponent) {
-      launchBattle(initRes.opponent, initRes.matchId);
+      launchBattle(initRes.opponent, initRes.matchId, initRes.isRealPlayer);
       return;
     }
   } catch (err) {
@@ -617,7 +623,7 @@ window.gymforge.startMatchmaking = async function() {
       if (statusRes.matched && statusRes.opponent) {
         clearInterval(matchmakingInterval);
         matchmakingInterval = null;
-        launchBattle(statusRes.opponent, statusRes.matchId);
+        launchBattle(statusRes.opponent, statusRes.matchId, statusRes.isRealPlayer);
         return;
       }
     } catch {
@@ -654,15 +660,84 @@ window.gymforge.startMatchmaking = async function() {
         foto: picked.foto
       };
 
-      launchBattle(authenticOpponent, `match_colosseum_${Date.now()}`);
+      launchBattle(authenticOpponent, `match_colosseum_${Date.now()}`, false);
     }
   }, 1000);
 };
 
-function launchBattle(opponent, matchId) {
+function startMatchSync(matchId) {
+  stopMatchSync();
+  matchSyncInterval = setInterval(async () => {
+    try {
+      const res = await apiClient.request(`/api/arena/match/${matchId}/state`);
+      if (res && res.state) applyServerMatchState(res);
+    } catch { /* silent */ }
+  }, 1500);
+}
+
+function stopMatchSync() {
+  if (matchSyncInterval) {
+    clearInterval(matchSyncInterval);
+    matchSyncInterval = null;
+  }
+}
+
+function applyServerMatchState(serverData) {
+  const { state, isMyTurn, isPlayer1, status, winner } = serverData;
+  if (!state) return;
+
+  const ts = state.lastUpdated || 0;
+  if (ts <= lastSyncTs) return; // no new update
+  lastSyncTs = ts;
+
+  // Map server state to local player/opponent perspective
+  if (isPlayer1) {
+    playerHp = state.player1Hp;
+    opponentHp = state.player2Hp;
+    playerFury = state.player1Fury;
+    opponentFury = state.player2Fury;
+    isPlayerBlocking = state.player1Blocking;
+    isOpponentBlocking = state.player2Blocking;
+  } else {
+    playerHp = state.player2Hp;
+    opponentHp = state.player1Hp;
+    playerFury = state.player2Fury;
+    opponentFury = state.player1Fury;
+    isPlayerBlocking = state.player2Blocking;
+    isOpponentBlocking = state.player1Blocking;
+  }
+
+  combatLogs = state.combatLog || [];
+  isPlayerTurn = isMyTurn;
+
+  // Show damage floater if opponent just attacked us
+  const lastAction = state.lastActionResult;
+  if (lastAction && lastAction.actorUserId !== myUserId && lastAction.damage > 0) {
+    showDamageFloater(lastAction.damage, lastAction.isCrit);
+    if (lastAction.isCrit) soundService.playHeavyHit();
+    else soundService.playHit();
+  }
+
+  // Finished?
+  if (status === 'finished' && winner && arenaState === 'battle') {
+    stopMatchSync();
+    soundService.playKO();
+    setTimeout(() => endBattle(winner === myUserId ? 'player' : 'opponent'), 800);
+    return;
+  }
+
+  window.gymforge.refreshPage();
+}
+
+function launchBattle(opponent, matchId, realPlayer = false) {
   const user = storageService.getUserProfile() || {};
   const character = storageService.getCharacter() || {};
   const attrs = character.atributos || { VITALIDADE: 10 };
+
+  // Set real match sync flags
+  isRealPlayerMatch = realPlayer === true;
+  myUserId = user.userId || user.email || 'warrior_guest';
+  lastSyncTs = 0;
 
   currentOpponent = opponent || {
     nome: "Leonidas do Aço",
@@ -670,9 +745,7 @@ function launchBattle(opponent, matchId) {
     nivel: user?.nivel || 1,
     classe: "guerreiro",
     atributos: { FORCA: 14, RESISTENCIA: 12, AGILIDADE: 8, VITALIDADE: 12, DISCIPLINA: 10 },
-    maxHp: 250,
-    currentHp: 250,
-    fury: 0,
+    maxHp: 250, currentHp: 250, fury: 0,
     rating: (user.pvpRating || 1000) + 10
   };
   currentMatch = matchId || `match_${Date.now()}`;
@@ -680,17 +753,23 @@ function launchBattle(opponent, matchId) {
   playerMaxHp = 100 + ((attrs.VITALIDADE || 10) * 15) + ((user.nivel || 1) * 10);
   playerHp = playerMaxHp;
   playerFury = 0;
-  opponentMaxHp = currentOpponent.maxHp || (100 + ((currentOpponent.atributos?.VITALIDADE || 10) * 15) + ((currentOpponent.nivel || 1) * 10)) || 250;
+  opponentMaxHp = currentOpponent.maxHp || (100 + ((currentOpponent.atributos?.VITALIDADE || 10) * 15) + ((currentOpponent.nivel || 1) * 10));
   opponentHp = opponentMaxHp;
   opponentFury = 0;
-  combatLogs = ["⚔️ O árbitro da arena sinaliza o início do combate! FIGHT!"];
-  isPlayerTurn = true;
+  combatLogs = ['O arbitro da arena sinaliza o inicio do combate! FIGHT!'];
+  isPlayerTurn = true; // for bot; for real match, server will correct via sync
   isPlayerBlocking = false;
   isOpponentBlocking = false;
 
   soundService.playFightStart();
   arenaState = 'battle';
   window.gymforge.refreshPage();
+
+  // Start real-time sync for real player matches
+  if (isRealPlayerMatch && currentMatch) {
+    // Small delay to let server initialize battle state
+    setTimeout(() => startMatchSync(currentMatch), 800);
+  }
 }
 
 window.gymforge.cancelMatchmaking = function() {
@@ -698,14 +777,50 @@ window.gymforge.cancelMatchmaking = function() {
     clearInterval(matchmakingInterval);
     matchmakingInterval = null;
   }
+  stopMatchSync();
   soundService.playClick();
   arenaState = 'lobby';
+  isRealPlayerMatch = false;
   window.gymforge.refreshPage();
 };
 
-window.gymforge.executeBattleAction = function(actionType) {
+window.gymforge.executeBattleAction = async function(actionType) {
   if (!isPlayerTurn) return;
 
+  // --- REAL PVP MATCH: submit action to server ---
+  if (isRealPlayerMatch && currentMatch) {
+    isPlayerTurn = false;
+    window.gymforge.refreshPage();
+    try {
+      const res = await apiClient.request(`/api/arena/match/${currentMatch}/action`, {
+        method: 'POST',
+        body: JSON.stringify({ actionType, userId: myUserId })
+      });
+      if (res.success && res.newState) {
+        // Immediately apply the result (our own action feedback)
+        const s = res.newState;
+        const isP1 = res.newState.currentTurnUserId !== myUserId ||
+                      (s.player1Hp !== undefined && s.player2Hp !== undefined);
+        // Re-derive perspective from server state via next sync
+        lastSyncTs = 0; // force apply on next poll
+        const ar = res.actionResult;
+        if (ar && ar.damage > 0) showDamageFloater(ar.damage, ar.isCrit);
+        if (ar?.isCrit) soundService.playHeavyHit();
+        else if (actionType === 'forge_ultimate') soundService.playSpecial();
+        else if (actionType === 'iron_block') soundService.playBlock();
+        else soundService.playHit();
+      } else if (res.error === 'Not your turn') {
+        isPlayerTurn = false;
+      }
+    } catch (err) {
+      console.warn('[Arena] action submit failed:', err);
+      isPlayerTurn = true;
+    }
+    window.gymforge.refreshPage();
+    return;
+  }
+
+  // --- LOCAL BOT MATCH ---
   isPlayerTurn = false;
   const user = storageService.getUserProfile() || {};
   const character = storageService.getCharacter() || {};
@@ -843,6 +958,8 @@ function showDamageFloater(damage, isCrit = false) {
 }
 
 function endBattle(winner) {
+  stopMatchSync();
+  isRealPlayerMatch = false;
   battleWinner = winner;
   arenaState = 'result';
 
@@ -867,3 +984,4 @@ function endBattle(winner) {
   storageService.saveUserProfile(user);
   window.gymforge.refreshPage();
 }
+
