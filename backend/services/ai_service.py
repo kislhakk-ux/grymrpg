@@ -28,12 +28,9 @@ def generate_ai_response(user_input: str, user_id: str = "warrior_demo_1", clien
     # If Gemini API Key is configured, attempt real Gemini call
     if GEMINI_API_KEY and not GEMINI_API_KEY.startswith("sua_chave"):
         try:
-            import google.generativeai as genai
-            genai.configure(api_key=GEMINI_API_KEY)
-            model = genai.GenerativeModel("gemini-1.5-flash")
-
-            full_prompt = f"""
-{SYSTEM_PROMPT}
+            import requests
+            url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_API_KEY}"
+            full_prompt = f"""{SYSTEM_PROMPT}
 
 ## CONTEXTO DO USUÁRIO (RAG ESTRUTURADO DO FIRESTORE):
 - Usuário: {user_context.get('user', {})}
@@ -46,8 +43,16 @@ def generate_ai_response(user_input: str, user_id: str = "warrior_demo_1", clien
 ## PERGUNTA DO GUERREIRO:
 "{user_input}"
 """
-            response = model.generate_content(full_prompt)
-            return {"response": response.text, "model": "gemini-1.5-flash"}
+            payload = {
+                "contents": [{"parts": [{"text": full_prompt}]}]
+            }
+            res = requests.post(url, json=payload, headers={"Content-Type": "application/json"}, timeout=15)
+            if res.status_code == 200:
+                data = res.json()
+                text = data["candidates"][0]["content"]["parts"][0]["text"]
+                return {"response": text, "model": "gemini-1.5-flash"}
+            else:
+                print(f"[AI Service] Gemini REST API status {res.status_code}: {res.text}")
         except Exception as e:
             print(f"[AI Service] Erro ao chamar API Gemini: {e}. Utilizando gerador local contextual.")
 
